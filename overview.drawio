@@ -1,9 +1,18 @@
 <mxfile host="65bd71144e">
     <diagram name="第 1 页" id="IkrwRGr3d4S3s5oOA61h">
-        <mxGraphModel dx="736" dy="1124" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="1" shadow="0">
+        <mxGraphModel dx="1408" dy="787" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="1" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
+                <mxCell id="46" value="\(e_{t+3}^3\)" style="shape=cube;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;darkOpacity=0.05;darkOpacity2=0.1;size=10;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontFamily=Comic Sans MS;strokeWidth=2;fontSize=15;" vertex="1" parent="1">
+                    <mxGeometry x="220" y="830" width="45" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="47" value="\(e_{t+2}^3\)" style="shape=cube;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;darkOpacity=0.05;darkOpacity2=0.1;size=10;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontFamily=Comic Sans MS;strokeWidth=2;fontSize=15;" vertex="1" parent="1">
+                    <mxGeometry x="185" y="830" width="45" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="48" value="\(e_{t+1}^3\)" style="shape=cube;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;darkOpacity=0.05;darkOpacity2=0.1;size=10;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontFamily=Comic Sans MS;strokeWidth=2;fontSize=15;" vertex="1" parent="1">
+                    <mxGeometry x="150" y="830" width="45" height="40" as="geometry"/>
+                </mxCell>
                 <mxCell id="LdaXk9dYtU-iMzSWdhZO-95" value="\(e_{t+3}^1\)" style="shape=cube;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;darkOpacity=0.05;darkOpacity2=0.1;size=10;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontFamily=Comic Sans MS;strokeWidth=2;fontSize=15;" parent="1" vertex="1">
                     <mxGeometry x="1231" y="290" width="45" height="40" as="geometry"/>
                 </mxCell>
@@ -434,6 +443,9 @@
                             <mxPoint x="10" y="740"/>
                         </Array>
                     </mxGeometry>
+                </mxCell>
+                <mxCell id="45" value="\(g_t^3\)" style="shape=cube;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;darkOpacity=0.05;darkOpacity2=0.1;size=10;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontFamily=Comic Sans MS;strokeWidth=2;fontSize=15;" vertex="1" parent="1">
+                    <mxGeometry x="90" y="830" width="70" height="40" as="geometry"/>
                 </mxCell>
             </root>
         </mxGraphModel>
