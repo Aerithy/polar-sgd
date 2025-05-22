@@ -1,0 +1,7 @@
+*.pyc
+*.md
+*.tar.gz
+*.safetensors
+!README.md
+
+__pycache__/
