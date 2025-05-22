@@ -5,3 +5,6 @@
 !README.md
 
 __pycache__/
+glue/
+cifar-10-batches-py/
+._____temp/
