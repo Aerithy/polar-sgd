@@ -8,15 +8,14 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from transformers import (
+from transformers import ( 
     AutoTokenizer,
+    AutoConfig,
     AutoModelForSequenceClassification,
     get_linear_schedule_with_warmup,
 )
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
-
-from tokenizer.tokenize_preprocess import tokenize_function
 from utils.buffer import TensorBuffer
 
 logging.basicConfig(
@@ -24,6 +23,170 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class Hookmanager:
+    def __init__(self, inter_group, local_group, model, partitions):
+        self.inter_group = inter_group
+        self.local_group = local_group
+        self.model = model
+        self.partitions = partitions
+        self.parts = 
+        self.hooks = []
+        self.hook_handles = []
+
+class PolarTrainer:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        inter_group,
+        local_group,
+        model=None,
+        device=None,
+        tokenizer=None,
+    ):
+        self.local_group = local_group
+        self.inter_group = inter_group
+        self.device = device or torch.device(f"cuda:{dist.get_rank(group=self.local_group)}")
+        if args.pretrained:
+            self.model = model or AutoModelForSequenceClassification.from_pretrained(
+                args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
+            )
+            self.model.to(device)
+        else:
+            config = AutoConfig.from_pretrained(
+                args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
+            )
+            self.model = model or AutoModelForSequenceClassification.from_config(config)
+            self.model.to(device)
+            
+        self.communication_hook = HookManager(
+            inter_group, local_group, self.model, self.split_model_into_partitions(args.num_partitions)
+        )
+        self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
+        self.dataset = load_from_disk(args.data_path)
+        
+        def tokenize_function(examples):
+            return tokenizer(
+                examples["sentence"],
+                padding="max_length",
+                truncation=True,
+                max_length=args.max_length,
+            )
+
+        tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
+        tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
+        tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
+        tokenized_dataset.set_format("torch")
+        self.tokenized_dataset = tokenized_dataset
+        
+        train_sampler = DistributedSampler(
+            tokenized_dataset["train"],
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True,
+        )
+        
+        eval_sampler = DistributedSampler(
+            tokenized_dataset["validation"],
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=False,
+        )
+
+        self.train_dataloader = DataLoader(
+            tokenized_dataset["train"], batch_size=args.batch_size, sampler=train_sampler
+        )
+
+        self.eval_dataloader = DataLoader(
+            tokenized_dataset["validation"],
+            batch_size=args.batch_size,
+            sampler=eval_sampler,
+        )
+        
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        total_steps = len(self.train_dataloader) * args.epochs
+
+        self.scheduler = get_linear_schedule_with_warmup(
+            self.optimizer, num_warmup_steps=0.1 * total_steps, num_training_steps=total_steps
+        )
+        
+    def split_model_into_partitions(self, num_partitions):
+        modules = list(self.model.children())[::-1]
+        layer_param_sizes = []
+        for layer in self.model.children():
+            layer_param_sizes.append(sum(p.numel() for p in layer.parameters()))
+        total_params = sum(layer_param_sizes)
+        target_size = total_params / num_partitions
+
+        partitions = []
+        acc = 0
+        start = 0
+        for i, size in enumerate(layer_param_sizes):
+            acc += size
+            if len(partitions) < num_partitions - 1:
+                prev_diff = abs(target_size - (acc - size))
+                curr_diff = abs(target_size - acc)
+                if curr_diff > prev_diff:
+                    partitions.append(i)
+                    acc = size 
+
+        partitions.append(len(layer_param_sizes) - 1)
+        return partitions
+        
+    def train(self, args):
+        send_buffers = [
+            torch.zeros_like(param) for param in self.model.parameters() if param.requires_grad
+        ]
+        print("send_buffers")
+        LOCAL_STEPS = 1  # 每4个batch同步一次梯度
+        current_local_step = 0  # 当前本地步数计数器
+        print(f"LOCAL_STEPS: {args.local_steps}")
+        # 训练循环
+        for epoch in range(args.epochs):
+            self.model.train()
+            total_loss = 0
+            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
+
+            for batch_idx, batch in enumerate(progress_bar):
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                outputs = self.model(**batch)
+                loss = outputs.loss
+                loss.backward()
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                current_local_step += 1
+                need_sync = (current_local_step % args.local_steps == 0) or (
+                    batch_idx + 1 == len(self.train_dataloader)
+                )
+
+                if need_sync:
+                    grad_vec = [
+                        parameter.grad
+                        for parameter in self.model.parameters()
+                        if parameter.requires_grad
+                    ]
+                    for grad, send_buffer in zip(grad_vec, send_buffers):
+                        send_buffer[:] = grad
+
+                    tensor_buffer = TensorBuffer(send_buffers)
+                    flat_buffer = tensor_buffer.buffer
+                    dist.all_reduce(flat_buffer)
+                    tensor_buffer.buffer = flat_buffer
+                    grads = tensor_buffer.deflatten()
+
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+
+                else:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+                total_loss += loss.item()
+                progress_bar.set_postfix({"loss": loss.item()})
+
+            avg_train_loss = total_loss / len(self.train_dataloader)
+            print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
 
 def _train(args: argparse.Namespace, inter_group, local_group):
     local_rank = dist.get_rank(group=local_group)
@@ -34,6 +197,14 @@ def _train(args: argparse.Namespace, inter_group, local_group):
 
     dataset = load_from_disk(args.data_path)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+
+    def tokenize_function(examples):
+        return tokenizer(
+            examples["sentence"],
+            padding="max_length",
+            truncation=True,
+            max_length=args.max_length,
+        )
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
     tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
@@ -75,12 +246,12 @@ def _train(args: argparse.Namespace, inter_group, local_group):
             args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
         )
         model = AutoModelForSequenceClassification.from_config(config)
-        
+
     model.to(device)
-    
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     total_steps = len(train_dataloader) * args.epochs
-    
+
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=0.1 * total_steps, num_training_steps=total_steps
     )
@@ -91,7 +262,7 @@ def _train(args: argparse.Namespace, inter_group, local_group):
     print("send_buffers")
     LOCAL_STEPS = 1  # 每4个batch同步一次梯度
     current_local_step = 0  # 当前本地步数计数器
-    print(f"LOCAL_STEPS: {LOCAL_STEPS}")
+    print(f"LOCAL_STEPS: {args.local_steps}")
     # 训练循环
     for epoch in range(args.epochs):
         model.train()
@@ -107,7 +278,9 @@ def _train(args: argparse.Namespace, inter_group, local_group):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             current_local_step += 1
-            need_sync = (current_local_step % LOCAL_STEPS == 0) or (batch_idx + 1 == len(train_dataloader))
+            need_sync = (current_local_step % args.local_steps == 0) or (
+                batch_idx + 1 == len(train_dataloader)
+            )
 
             if need_sync:
                 grad_vec = [
@@ -117,7 +290,7 @@ def _train(args: argparse.Namespace, inter_group, local_group):
                 ]
                 for grad, send_buffer in zip(grad_vec, send_buffers):
                     send_buffer[:] = grad
-                    
+
                 tensor_buffer = TensorBuffer(send_buffers)
                 flat_buffer = tensor_buffer.buffer
                 dist.all_reduce(flat_buffer)
@@ -127,16 +300,17 @@ def _train(args: argparse.Namespace, inter_group, local_group):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-            
+
             else:
                 optimizer.step()
-                optimizer.zero_grad()    
-            
+                optimizer.zero_grad()
+
             total_loss += loss.item()
             progress_bar.set_postfix({"loss": loss.item()})
 
         avg_train_loss = total_loss / len(train_dataloader)
         print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
+
 
 def process_group_setup():
     # init the global process group
@@ -180,7 +354,7 @@ def process_group_setup():
 
 
 if __name__ == "__main__":
-    parser = argparse.Namespace()
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model", type=str, default="bert-base-uncased", help="model name"
     )
@@ -221,4 +395,4 @@ if __name__ == "__main__":
     global_group, inter_group, local_group = process_group_setup()
 
     logger.info("Starting training...")
-    train(args=parser.parse_args(), inter_group=inter_group, local_group=local_group)
+    _train(args=parser.parse_args(), inter_group=inter_group, local_group=local_group)

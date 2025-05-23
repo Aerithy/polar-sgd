@@ -32,3 +32,23 @@ We proposed a new method to update the global model parameters, which is called 
 In Polar SGD, we update the global model parameters by transmit gradient. The Architecture of Polar SGD is shown in the following figure. 
 
 <img src="./overview.png">
+
+
+We proposed a gradient prediction method to increase the communication and computation overlap. lets assume the prediction function is $P(g, \tau)$, which $g$ is the gradient and $\tau$ is the gradient of next $\tau$ time steps.
+
+$$
+\begin{align}
+    \theta_{t + T}^i & = \theta_t^i - \eta \cdot P(g, T) \\
+\end{align}
+$$
+
+So the global model update formula is: 
+
+$$
+\begin{align}
+    \theta_{t + T} & = \frac{1}{K} \sum_{i=0}^{K-1} \theta_{t + T}^i \\
+    \theta_{t + T} & = \frac{1}{K} \sum_{i=0}^{K-1} \left(\theta_t^i - \eta \cdot \sum_{n = 0}^{T - 1} g_{t + n}^i \right) \\
+    \theta_{t + T} & = \frac{1}{K} \sum_{i=0}^{K-1} \theta_t^i - \frac{1}{K} \sum_{i=0}^{K-1} \eta \cdot \sum_{n = 0}^{T - 1} g_{t + n}^i \\
+    \theta_{t + T} & = \theta_t - \frac{\eta}{K}\sum_{i=0}^{K-1}\sum_{n = 0}^{T - 1} g_{t + n}^i \\
+\end{align}
+$$
