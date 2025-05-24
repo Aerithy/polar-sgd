@@ -12,8 +12,10 @@ from transformers import (
     AutoTokenizer,
     AutoConfig,
     AutoModelForSequenceClassification,
+    BertModel,
     get_linear_schedule_with_warmup,
 )
+from transformers.models.bert.modeling_bert import BertLayer, BertEmbeddings, BertPooler, BertEncoder
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
@@ -29,7 +31,7 @@ class Hookmanager:
         self.local_group = local_group
         self.model = model
         self.partitions = partitions
-        self.parts = 
+        # self.parts = 
         self.hooks = []
         self.hook_handles = []
 
@@ -58,7 +60,7 @@ class PolarTrainer:
             self.model = model or AutoModelForSequenceClassification.from_config(config)
             self.model.to(device)
             
-        self.communication_hook = HookManager(
+        self.communication_hook = Hookmanager(
             inter_group, local_group, self.model, self.split_model_into_partitions(args.num_partitions)
         )
         self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
@@ -108,6 +110,26 @@ class PolarTrainer:
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer, num_warmup_steps=0.1 * total_steps, num_training_steps=total_steps
         )
+    
+    def get_bert_all_layers(self, module):
+        for name, child in module.named_children():
+            if isinstance(child, BertModel):
+                yield from self.get_bert_all_layers(child)
+            if isinstance(child, BertEncoder):
+                yield from self.get_bert_all_layers(child)
+            if isinstance(child, torch.nn.ModuleList):
+                yield from self.get_bert_all_layers(child)
+            if isinstance(child, BertEmbeddings):
+                yield child
+            if isinstance(child, BertLayer):
+                yield child
+            if isinstance(child, BertPooler):
+                yield child
+            if isinstance(child, torch.nn.Linear):
+                yield child
+            if isinstance(child, torch.nn.Dropout):
+                yield child
+    def split_bert_based_model_into_partitions(self, num_partitions):     
         
     def split_model_into_partitions(self, num_partitions):
         modules = list(self.model.children())[::-1]
