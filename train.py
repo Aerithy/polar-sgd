@@ -8,14 +8,19 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from transformers import ( 
+from transformers import (
     AutoTokenizer,
     AutoConfig,
     AutoModelForSequenceClassification,
     BertModel,
     get_linear_schedule_with_warmup,
 )
-from transformers.models.bert.modeling_bert import BertLayer, BertEmbeddings, BertPooler, BertEncoder
+from transformers.models.bert.modeling_bert import (
+    BertLayer,
+    BertEmbeddings,
+    BertPooler,
+    BertEncoder,
+)
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
@@ -25,15 +30,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class Hookmanager:
     def __init__(self, inter_group, local_group, model, partitions):
         self.inter_group = inter_group
         self.local_group = local_group
         self.model = model
         self.partitions = partitions
-        # self.parts = 
+        # self.parts =
         self.hooks = []
         self.hook_handles = []
+
 
 class PolarTrainer:
     def __init__(
@@ -47,7 +54,9 @@ class PolarTrainer:
     ):
         self.local_group = local_group
         self.inter_group = inter_group
-        self.device = device or torch.device(f"cuda:{dist.get_rank(group=self.local_group)}")
+        self.device = device or torch.device(
+            f"cuda:{dist.get_rank(group=self.local_group)}"
+        )
         if args.pretrained:
             self.model = model or AutoModelForSequenceClassification.from_pretrained(
                 args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
@@ -59,13 +68,10 @@ class PolarTrainer:
             )
             self.model = model or AutoModelForSequenceClassification.from_config(config)
             self.model.to(device)
-            
-        self.communication_hook = Hookmanager(
-            inter_group, local_group, self.model, self.split_model_into_partitions(args.num_partitions)
-        )
+
         self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
         self.dataset = load_from_disk(args.data_path)
-        
+
         def tokenize_function(examples):
             return tokenizer(
                 examples["sentence"],
@@ -79,14 +85,30 @@ class PolarTrainer:
         tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
         tokenized_dataset.set_format("torch")
         self.tokenized_dataset = tokenized_dataset
-        
+
+        if args.model == "bert-base-uncased":
+            self.model_partitions = self.split_bert_based_model_into_partitions(
+                self.model
+            )
+        else:
+            raise NotImplementedError(
+                "Only BERT-based models are supported for partitioning at the moment."
+            )
+
+        self.communication_hook = Hookmanager(
+            inter_group,
+            local_group,
+            self.model,
+            self.split_model_into_partitions(args.num_partitions),
+        )
+
         train_sampler = DistributedSampler(
             tokenized_dataset["train"],
             num_replicas=dist.get_world_size(),
             rank=dist.get_rank(),
             shuffle=True,
         )
-        
+
         eval_sampler = DistributedSampler(
             tokenized_dataset["validation"],
             num_replicas=dist.get_world_size(),
@@ -95,7 +117,9 @@ class PolarTrainer:
         )
 
         self.train_dataloader = DataLoader(
-            tokenized_dataset["train"], batch_size=args.batch_size, sampler=train_sampler
+            tokenized_dataset["train"],
+            batch_size=args.batch_size,
+            sampler=train_sampler,
         )
 
         self.eval_dataloader = DataLoader(
@@ -103,14 +127,18 @@ class PolarTrainer:
             batch_size=args.batch_size,
             sampler=eval_sampler,
         )
-        
+
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         total_steps = len(self.train_dataloader) * args.epochs
 
         self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, num_warmup_steps=0.1 * total_steps, num_training_steps=total_steps
+            self.optimizer,
+            num_warmup_steps=0.1 * total_steps,
+            num_training_steps=total_steps,
         )
-    
+        
+        self.grad_partitions_bucket = []
+
     def get_bert_all_layers(self, module):
         for name, child in module.named_children():
             if isinstance(child, BertModel):
@@ -129,8 +157,54 @@ class PolarTrainer:
                 yield child
             if isinstance(child, torch.nn.Dropout):
                 yield child
-    def split_bert_based_model_into_partitions(self, num_partitions):     
-        
+
+    def split_bert_based_model_into_partitions(self, num_partitions):
+        modules = list(self.get_bert_all_layers(self.model))
+        layer_param_sizes = []
+
+        for layer in modules:
+            layer_param_sizes.append(
+                sum(p.numel() for p in layer.parameters() if p.requires_grad)
+            )
+
+        total_params = sum(layer_param_sizes)
+        target_size = total_params / num_partitions
+
+        partitions = []
+        i = 0
+        while True:
+            partitions_params_size = 0
+            partition = []
+            while partitions_params_size < target_size and i < len(layer_param_sizes):
+                partitions_params_size += layer_param_sizes[i]
+                partition.append(modules[i])
+                i += 1
+
+            if i == len(layer_param_sizes):
+                partitions.append(partition)
+                break
+
+            if abs(partitions_params_size - target_size) < abs(
+                partitions_params_size + layer_param_sizes[i] - target_size
+            ):
+                partitions.append(partition)
+            else:
+                partitions.append(partition.append(modules[i]))
+                i += 1
+
+        return partitions
+
+    def register_partitions_hooks(self):
+        def non_communication_hook(module, grad_input, grad_output):
+            
+        for partition in self.model_partitions:
+            for i, module in enumerate(partition):
+                if i == 0:
+                    
+                else:
+                    
+            def hook()
+    
     def split_model_into_partitions(self, num_partitions):
         modules = list(self.model.children())[::-1]
         layer_param_sizes = []
@@ -149,14 +223,16 @@ class PolarTrainer:
                 curr_diff = abs(target_size - acc)
                 if curr_diff > prev_diff:
                     partitions.append(i)
-                    acc = size 
+                    acc = size
 
         partitions.append(len(layer_param_sizes) - 1)
         return partitions
-        
+
     def train(self, args):
         send_buffers = [
-            torch.zeros_like(param) for param in self.model.parameters() if param.requires_grad
+            torch.zeros_like(param)
+            for param in self.model.parameters()
+            if param.requires_grad
         ]
         print("send_buffers")
         LOCAL_STEPS = 1  # 每4个batch同步一次梯度
@@ -209,6 +285,7 @@ class PolarTrainer:
 
             avg_train_loss = total_loss / len(self.train_dataloader)
             print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
+
 
 def _train(args: argparse.Namespace, inter_group, local_group):
     local_rank = dist.get_rank(group=local_group)
