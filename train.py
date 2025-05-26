@@ -30,17 +30,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class PolarHook:
+    def __init__(self, inter_group, local_group, partition, send_buffer):
+        """__init__
 
-class Hookmanager:
-    def __init__(self, inter_group, local_group, model, partitions):
+        Args:
+            inter_group (_type_): Distributed group for inter-node communication
+            local_group (_type_): Distributed group for intra-node communication
+            partition (_type_): Model partition to which this hook is attached. i.e. hook does not modify the model parameters either the gradients.
+            send_buffer (_type_): Send buffer for gradients, size of this buffer should be equal to the partition's size, everything received from all_reduce operation will be an in-place operation..
+        """
         self.inter_group = inter_group
         self.local_group = local_group
-        self.model = model
-        self.partitions = partitions
-        # self.parts =
-        self.hooks = []
-        self.hook_handles = []
+        self.partition = partition
+        self.handle = None
+        self.send_buffer = send_buffer
 
+    def __call__(self, module, grad_input, grad_output):
+        grads = [p.grad.copy() for p in self.partition]
+        self.send_buffer = TensorBuffer(grads)
+        reduce_handle = dist.all_reduce(tensor=self.send_buffer.buffer, group=self.inter_group)
+        self.handle = reduce_handle
 
 class PolarTrainer:
     def __init__(
@@ -86,21 +96,15 @@ class PolarTrainer:
         tokenized_dataset.set_format("torch")
         self.tokenized_dataset = tokenized_dataset
 
+        self.model_partitions = None
         if args.model == "bert-base-uncased":
             self.model_partitions = self.split_bert_based_model_into_partitions(
-                self.model
+                self.model, self.args.local_steps
             )
         else:
             raise NotImplementedError(
                 "Only BERT-based models are supported for partitioning at the moment."
             )
-
-        self.communication_hook = Hookmanager(
-            inter_group,
-            local_group,
-            self.model,
-            self.split_model_into_partitions(args.num_partitions),
-        )
 
         train_sampler = DistributedSampler(
             tokenized_dataset["train"],
@@ -220,7 +224,7 @@ class PolarTrainer:
             self.model.train()
             total_loss = 0
             progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
-
+ 
             for batch_idx, batch in enumerate(progress_bar):
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 outputs = self.model(**batch)
@@ -228,7 +232,9 @@ class PolarTrainer:
                 loss.backward()
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
+                
+                part_rank = current_local_step % args.local_steps
+                
                 current_local_step += 1
                 need_sync = (current_local_step % args.local_steps == 0) or (
                     batch_idx + 1 == len(self.train_dataloader)
