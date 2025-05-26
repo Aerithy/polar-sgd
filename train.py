@@ -194,39 +194,16 @@ class PolarTrainer:
 
         return partitions
 
-    def register_partitions_hooks(self):
-        def non_communication_hook(module, grad_input, grad_output):
+    # def register_partitions_hooks(self):
+    #     def non_communication_hook(module, grad_input, grad_output):
             
-        for partition in self.model_partitions:
-            for i, module in enumerate(partition):
-                if i == 0:
+    #     for partition in self.model_partitions:
+    #         for i, module in enumerate(partition):
+    #             if i == 0:
                     
-                else:
+    #             else:
                     
-            def hook()
-    
-    def split_model_into_partitions(self, num_partitions):
-        modules = list(self.model.children())[::-1]
-        layer_param_sizes = []
-        for layer in self.model.children():
-            layer_param_sizes.append(sum(p.numel() for p in layer.parameters()))
-        total_params = sum(layer_param_sizes)
-        target_size = total_params / num_partitions
-
-        partitions = []
-        acc = 0
-        start = 0
-        for i, size in enumerate(layer_param_sizes):
-            acc += size
-            if len(partitions) < num_partitions - 1:
-                prev_diff = abs(target_size - (acc - size))
-                curr_diff = abs(target_size - acc)
-                if curr_diff > prev_diff:
-                    partitions.append(i)
-                    acc = size
-
-        partitions.append(len(layer_param_sizes) - 1)
-        return partitions
+    #         def hook()
 
     def train(self, args):
         send_buffers = [
