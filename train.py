@@ -31,60 +31,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class PolarCommHook:
-    def __init__(self, rank, partitions, manage_hook_handle, inter_group, local_group, comm_work, grads, tensor_buffer):
+    def __init__(self, rank, partitions, manage_hook_handle, 
+                 inter_group, local_group, comm_works, grads, 
+                 tensor_buffer, errors):
+        """
+        rank (int): Communication rank of the partitions.
+        partitions (list): List of model partitions. Each partition is a list of layers.
+        grads (list): List of gradients. These gradients are used to accumulate the parameter.grads.
+        # tensor_buffer (TensorBuffer): TensorBuffer object to store the gradients.
+        iterations (int): Currently batch iterations.  
+        """
         self.rank = rank
         self.partitions = partitions
         self.manage_hook_handle = manage_hook_handle
         self.inter_group = inter_group
         self.local_group = local_group
-        self.comm_work = comm_work
+        self.comm_works = comm_works
         self.grads = grads
         self.tensor_buffer = tensor_buffer
+        self.iterations = 0
+        self.errors = errors
         
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions. 
         if self.rank:
             self.manage_hook_handle[self.rank - 1].remove()
             self.manage_hook_handle[self.rank - 1] = None
-        
-        # Register a hook to the last layer of this partitions, which won't be called in the current iteration
-        # This hook will be called in the next iteration, which is used to remove the current hook. 
-        # So the next iteration won't call the current hook again. 
-        hook = PolarManageHook(
-            inter_group=self.inter_group,
-            local_group=self.local_group,
-            partitions=self.partitions,
-            send_buffer=self.partitions[self.rank],
-        )
-        self.manage_hook_handle[self.rank] = self.partitions[self.rank][-1].register_full_backward_hook(hook)
             
-        self.grads = [p.grad.copy() for p in self.partitions[self.rank]]   
-        self.tensor_buffer = TensorBuffer(self.grads)
-        self.comm_work = dist.all_reduce(self.tensor_buffer.buffer, async_op=True, group=self.inter_group)
-    
-class PolarManageHook:
-    def __init__(self, rank, partitions, comm_hook_handle, inter_group, local_group, comm_work, grads, tensor_buffer):
-        self.rank = rank
-        self.partitions = partitions
-        self.comm_hook_handle = comm_hook_handle
-        self.inter_group = inter_group
-        self.local_group = local_group
-        self.comm_work = comm_work
-        self.grads = grads
-        self.tensor_buffer = tensor_buffer
-        
-    def __call__(self, module, grad_input, grad_output):
-        if self.comm_hook_handle[self.rank] is not None:
-            self.comm_hook_handle[self.rank].remove()
-            self.comm_hook_handle[self.rank] = None
-        
-        self.comm_work.wait()
-        self.comm_work = None
-        
-        # self.grads[self.rank] = self.tensor_buffer[self.rank]
+        if self.iterations == self.rank:    
+            # self.grads = [p.grad.copy() for p in self.partitions[self.rank]]   
+            for p in self.partitions[self.rank]:
+                self.grads += p.grad
+            self.tensor_buffer = TensorBuffer(self.grads)
+            comm_handle = dist.all_reduce(self.tensor_buffer.buffer, async_op=True, group=self.inter_group)
+            self.comm_works[self.rank] = comm_handle 
 
-class GradientCollector:
-    def __init__(self, inter_group, local_group, partitions, send_buffer):
+class NativePolarGradientCollector:
+    """
+    methods:
+        register_hook(rank): Register hook to the first layer of the partition. 
+        synchronize(): Synchronize the gradients across all partitions.
+    """
+    def __init__(self, inter_group, local_group, partitions):
         """__init__
 
         Args:
@@ -95,15 +83,39 @@ class GradientCollector:
         """
         self.inter_group = inter_group
         self.local_group = local_group
-        self.partitions = partitions
+        self.partitions = partitions[::-1] 
         self.comm_hook_handle = [None for _ in range(len(self.partitions))]
-        self.comm_work = None
+        self.comm_works = [None for _ in range(len(self.partitions))]
         self.manage_hook_handle = [None for _ in range(len(self.partitions))]
-        self.send_buffer = send_buffer
+        # self.send_buffer = send_buffer
         self.grads = [[p.grad.copy() for p in partition] for partition in self.partitions]
         self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
+        self.errors = [[torch.zeros_like(p.grad) for p in partition] for partition in self.partitions]
         
     def register_hook(self, rank):
+        """Register hook to the first layer of the partition. 
+        
+        # Architecture
+        
+        ```
+        model = [
+            partition[N - 1] = {
+                layer[0 * M]        ==> register hook here, if rank = N - 1.
+                ...
+                layer[1 * M - 1]
+            }
+            partition[0] = {
+                layer[(N - 1) * M]  ==> register hook here, if rank = 0. 
+                ...
+                layer[N * M - 1]
+            }
+        ]
+        ```
+        
+        Args:
+            rank (int): Rank of the partition. 
+        
+        """
         self.comm_hook_handle[rank] = self.partitions[rank][0].register_full_backward_hook(
             PolarCommHook(
                 rank=rank,
@@ -111,7 +123,9 @@ class GradientCollector:
                 manage_hook_handle=self.manage_hook_handle,
                 inter_group=self.inter_group,
                 local_group=self.local_group,
-                comm_work=self.comm_work,
+                comm_works=self.comm_works,
+                grads=self.grads[rank],
+                tensor_buffer=self.tensor_buffers[rank],
             )
         )
         
@@ -184,36 +198,35 @@ class PolarTrainer:
             rank=dist.get_rank(),
             shuffle=True,
         )
-
         eval_sampler = DistributedSampler(
             tokenized_dataset["validation"],
             num_replicas=dist.get_world_size(),
             rank=dist.get_rank(),
             shuffle=False,
         )
-
         self.train_dataloader = DataLoader(
             tokenized_dataset["train"],
             batch_size=args.batch_size,
             sampler=train_sampler,
         )
-
         self.eval_dataloader = DataLoader(
             tokenized_dataset["validation"],
             batch_size=args.batch_size,
             sampler=eval_sampler,
         )
-
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        self.optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
         total_steps = len(self.train_dataloader) * args.epochs
-
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=0.1 * total_steps,
             num_training_steps=total_steps,
         )
-        
         self.grad_partitions_bucket = []
+        self.gradient_collector = NativePolarGradientCollector(
+            inter_group=self.inter_group,
+            local_group=self.local_group,
+            partitions=self.model_partitions,
+        )
 
     def get_bert_all_layers(self, module):
         for name, child in module.named_children():
@@ -286,10 +299,6 @@ class PolarTrainer:
             self.model.train()
             total_loss = 0
             progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
-            send_buffers = [
-                torch.zeros_like(param)
-                for param in self.model_partitions[0][0].parameters()
-            ]
             for batch_idx, batch in enumerate(progress_bar):
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 outputs = self.model(**batch)
@@ -299,12 +308,11 @@ class PolarTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 
                 part_rank = current_local_step % args.local_steps
-                send_buffer = [torch.zeros_like(param) for param in self.model_partitions[part_rank]]
                 
-                
+                self.gradient_collector.register_hook(part_rank)
                 
                 current_local_step += 1
-                need_sync = (current_local_step % args.local_steps == 0) or (
+                need_sync = (current_local_step % args.local_steps == 0) or ( 
                     batch_idx + 1 == len(self.train_dataloader)
                 )
 
