@@ -25,21 +25,71 @@ from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
 
-list = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],]
+from train import PolarTrainer, process_group_setup
 
-class TestClass:
+# list = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+#         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+#         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],]
+
+# class TestClass:
     
-    def __init__(self, list):
-        self.list = list[::-1]
+#     def __init__(self, list):
+#         self.list = list[::-1]
     
-    def get_list(self):
-        for i in range(len(self.list)):
-            for j in range(len(self.list[i])):
-                self.list[i].append(self.list[i][j] * 2)
+#     def get_list(self):
+#         for i in range(len(self.list)):
+#             for j in range(len(self.list[i])):
+#                 self.list[i].append(self.list[i][j] * 2)
             
-test_class = TestClass(list)
-test_class.get_list()
+# test_class = TestClass(list)
+# test_class.get_list()
 
-print(list)
+# print(list)
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--model", type=str, default="bert-base-uncased", help="model name"
+)
+parser.add_argument(
+    "--pretrained", type=bool, default=False, help="use pretrained model"
+)
+parser.add_argument(
+    "--data_path",
+    type=str,
+    default="data/glue/sst2",
+    help="path to the training data",
+)
+parser.add_argument(
+    "--model_path",
+    type=str,
+    default="models/bert-base-uncased",
+    help="path to the model",
+)
+parser.add_argument(
+    "--tokenizer_path",
+    type=str,
+    default="tokenizer/bert-base-uncased",
+    help="path to the tokenizer",
+)
+parser.add_argument(
+    "--num_labels", type=int, default=2, help="classification kinds"
+)
+parser.add_argument(
+    "--max_length", type=int, default=128, help="max length of the input sequence"
+)
+parser.add_argument("--batch_size", type=int, default=16)
+parser.add_argument("--lr", type=float, default=1e-5)
+parser.add_argument("--epochs", type=int, default=3)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--local_steps", type=int, default=4, help="local steps")
+
+args = parser.parse_args()
+
+global_group, inter_group, local_group = process_group_setup()
+
+config = AutoConfig.from_pretrained(
+    "models/bert-base-uncased", torch_dtype=torch.float16, num_labels=2
+)
+model = AutoModelForSequenceClassification.from_config(config)
+
+trainer = PolarTrainer(args=args, inter_group=inter_group, local_group=local_group, model=model)

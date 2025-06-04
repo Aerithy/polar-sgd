@@ -24,55 +24,133 @@ from transformers.models.bert.modeling_bert import (
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
+from typing import List
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+
 class PolarCommHook:
-    def __init__(self, rank, partitions, manage_hook_handle, 
-                 inter_group, local_group, comm_works, grads, 
-                 tensor_buffer, errors):
+    def __init__(
+        self,
+        rank: int,
+        partitions: List[List[torch.nn.Module]],
+        inter_group: torch.distributed.ProcessGroup,
+        local_group: torch.distributed.ProcessGroup,
+        comm_works: List[torch.distributed.Work],
+        grads: List[List[torch.Tensor]],
+        grads_pred: List[List[torch.Tensor]],
+        # tensor_buffer,
+        errors: List[List[torch.Tensor]],
+    ):
         """
         rank (int): Communication rank of the partitions.
         partitions (list): List of model partitions. Each partition is a list of layers.
         grads (list): List of gradients. These gradients are used to accumulate the parameter.grads.
         # tensor_buffer (TensorBuffer): TensorBuffer object to store the gradients.
-        iterations (int): Currently batch iterations.  
+        iterations (int): Currently batch iterations.
         """
         self.rank = rank
         self.partitions = partitions
-        self.manage_hook_handle = manage_hook_handle
         self.inter_group = inter_group
         self.local_group = local_group
         self.comm_works = comm_works
         self.grads = grads
-        self.tensor_buffer = tensor_buffer
+        self.grads_pred = grads_pred
+        self.flatten_grad_pred = None
+        # self.tensor_buffer = tensor_buffer
         self.iterations = 0
         self.errors = errors
-        
+
     def __call__(self, module, grad_input, grad_output):
-        # If this is not the first partitions. Then remove the hook of the previous backward partitions. 
+        # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         if self.rank:
             self.manage_hook_handle[self.rank - 1].remove()
             self.manage_hook_handle[self.rank - 1] = None
+
+        # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
+        # for layer, grad in zip(self.partitions[self.rank], self.grads[self.rank]):
+        #     self.grads += layer.grad
+        for i in range(len(self.partitions[self.rank])):
+            self.grads[self.rank][i] += self.partitions[self.rank][i].grad
             
-        if self.iterations == self.rank:    
-            # self.grads = [p.grad.copy() for p in self.partitions[self.rank]]   
-            for p in self.partitions[self.rank]:
-                self.grads += p.grad
+        if self.iterations == self.rank:
+            # self.grads = [p.grad.copy() for p in self.partitions[self.rank]]
+            self.grads_pred[self.rank] = (
+                self.grads[self.rank] * len(self.partitions) / self.rank + self.errors[self.rank]
+            )
+            self.flattened_grad_pred, self.num_tensors_per_list, self.tensor_sizes, self.original_shapes = self.flatten_nested_tensor_list(self.grads_pred[self.rank])  
             self.tensor_buffer = TensorBuffer(self.grads)
-            comm_handle = dist.all_reduce(self.tensor_buffer.buffer, async_op=True, group=self.inter_group)
-            self.comm_works[self.rank] = comm_handle 
+            comm_handle = dist.all_reduce(
+                self.flattened_grad_pred, async_op=True, group=self.inter_group
+            )
+            self.comm_works[self.rank] = comm_handle
+
+        if self.iterations == len(self.partitions) - 1:
+            self.errors = self.grads[self.rank] - self.grads_pred[self.rank]
+            self.comm_works[self.rank].wait()
+            self.grads_pred[self.rank] = self.reshape(self.flattened_grad_pred, self.num_tensors_per_list, self.tensor_sizes, self.original_shapes)
+            all_reduce_fix = self.grads[self.rank] - self.grads_pred[self.rank]
+            for i in range(len(self.partitions[self.rank])):
+                self.partitions[self.rank][i].params.grad = self.partitions[self.rank][i].params.grad - all_reduce_fix[i]
+            
+        self.iterations += 1
+        self.iterations %= len(self.partitions)
+        
+    def flatten_nested_tensor_list(nested_list: List[List[torch.Tensor]]) -> tuple[torch.Tensor, List[int], List[int], List[List[torch.Size]]]:
+        # 压平内层 List[torch.Tensor] 并记录结构
+        flattened_tensors = []
+        tensor_sizes = []       # 存储每个 Tensor 的元素数量
+        num_tensors_per_list = []  # 存储每个子列表的 Tensor 数量
+
+        for sublist in nested_list:
+            num_tensors_per_list.append(len(sublist))  # 记录当前子列表的 Tensor 数量
+            for tensor in sublist:
+                flattened = tensor.flatten()  # 压平当前 Tensor
+                tensor_sizes.append(flattened.numel())  # 记录元素数量
+                flattened_tensors.append(flattened)
+
+        # 将所有 Tensor 拼接成一个 1D Tensor
+        final_flattened = torch.cat(flattened_tensors)
+        
+        original_shapes = [[t.shape for t in sublist] for sublist in nested_list]
+        
+        return final_flattened, num_tensors_per_list, tensor_sizes, original_shapes
+
+    def unflatten_nested_tensor_list(
+        flattened: torch.Tensor,
+        num_tensors_per_list: List[int],
+        tensor_sizes: List[int],
+        original_shapes: List[List[tuple]]  # 需额外传入原始形状
+    ) -> List[List[torch.Tensor]]:
+        # Step 1: 按 tensor_sizes 切分 1D Tensor
+        split_tensors = torch.split(flattened, tensor_sizes)
+
+        # Step 2: 恢复每个 Tensor 的原始形状
+        restored_tensors = []
+        idx = 0
+        for shape_group in original_shapes:
+            current_group = []
+            for shape in shape_group:
+                tensor = split_tensors[idx].view(shape)  # 恢复形状
+                current_group.append(tensor)
+                idx += 1
+            restored_tensors.append(current_group)
+
+        return restored_tensors
 
 class NativePolarGradientCollector:
     """
     methods:
-        register_hook(rank): Register hook to the first layer of the partition. 
+        register_hook(rank): Register hook to the first layer of the partition.
         synchronize(): Synchronize the gradients across all partitions.
     """
-    def __init__(self, inter_group, local_group, partitions):
+
+    def __init__(
+        self, inter_group, local_group, partitions: List[List[torch.nn.Module]]
+    ):
         """__init__
 
         Args:
@@ -83,20 +161,29 @@ class NativePolarGradientCollector:
         """
         self.inter_group = inter_group
         self.local_group = local_group
-        self.partitions = partitions[::-1] 
+        self.partitions = partitions[::-1]
         self.comm_hook_handle = [None for _ in range(len(self.partitions))]
         self.comm_works = [None for _ in range(len(self.partitions))]
-        self.manage_hook_handle = [None for _ in range(len(self.partitions))]
         # self.send_buffer = send_buffer
-        self.grads = [[p.grad.copy() for p in partition] for partition in self.partitions]
-        self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
-        self.errors = [[torch.zeros_like(p.grad) for p in partition] for partition in self.partitions]
-        
-    def register_hook(self, rank):
-        """Register hook to the first layer of the partition. 
-        
+        self.grads_accumulation = [
+            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            for partition in self.partitions
+        ]
+        self.grads_pred = [
+            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            for partition in self.partitions
+        ]
+        # self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
+        self.errors = [
+            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            for partition in self.partitions
+        ]
+
+    def register_hook(self):
+        """Register hook to the first layer of the partition.
+
         # Architecture
-        
+
         ```
         model = [
             partition[N - 1] = {
@@ -105,38 +192,44 @@ class NativePolarGradientCollector:
                 layer[1 * M - 1]
             }
             partition[0] = {
-                layer[(N - 1) * M]  ==> register hook here, if rank = 0. 
+                layer[(N - 1) * M]  ==> register hook here, if rank = 0.
                 ...
                 layer[N * M - 1]
             }
         ]
         ```
-        
+
         Args:
-            rank (int): Rank of the partition. 
-        
+            rank (int): Rank of the partition.
+
         """
-        self.comm_hook_handle[rank] = self.partitions[rank][0].register_full_backward_hook(
-            PolarCommHook(
-                rank=rank,
-                partitions=self.partitions,
-                manage_hook_handle=self.manage_hook_handle,
-                inter_group=self.inter_group,
-                local_group=self.local_group,
-                comm_works=self.comm_works,
-                grads=self.grads[rank],
-                tensor_buffer=self.tensor_buffers[rank],
+        for rank in range(len(self.partitions)):
+            self.comm_hook_handle[rank] = self.partitions[rank][
+                0
+            ].register_full_backward_hook(
+                PolarCommHook(
+                    rank=rank,
+                    partitions=self.partitions,
+                    inter_group=self.inter_group,
+                    local_group=self.local_group,
+                    comm_works=self.comm_works,
+                    grads=self.grads_accumulation,
+                    grads_pred=self.grads_pred,
+                    errors=self.errors,
+                )
             )
-        )
-        
+
     def synchronize(self):
         if self.comm_work is not None:
-            self.comm_work.wait()
-            self.comm_work = None
+            for work in self.comm_works:
+                if work is not None:
+                    work.wait()
+                    work = None
+
         if self.comm_hook_handle is not None:
             self.comm_hook_handle.remove()
             self.comm_hook_handle = None
-        
+
 
 class PolarTrainer:
     def __init__(
@@ -169,7 +262,7 @@ class PolarTrainer:
         self.dataset = load_from_disk(args.data_path)
 
         def tokenize_function(examples):
-            return tokenizer(
+            return self.tokenizer(
                 examples["sentence"],
                 padding="max_length",
                 truncation=True,
@@ -185,7 +278,7 @@ class PolarTrainer:
         self.model_partitions = None
         if args.model == "bert-base-uncased":
             self.model_partitions = self.split_bert_based_model_into_partitions(
-                self.model, self.args.local_steps
+                args.local_steps
             )
         else:
             raise NotImplementedError(
@@ -227,8 +320,9 @@ class PolarTrainer:
             local_group=self.local_group,
             partitions=self.model_partitions,
         )
+        self.gradient_collector.register_hook()
 
-    def get_bert_all_layers(self, module):
+    def get_bert_all_layers(self, module: torch.nn.Module):
         for name, child in module.named_children():
             if isinstance(child, BertModel):
                 yield from self.get_bert_all_layers(child)
@@ -248,7 +342,7 @@ class PolarTrainer:
                 yield child
 
     def split_bert_based_model_into_partitions(self, num_partitions):
-        # TODO: the module list need to reverse. 
+        # TODO: the module list need to reverse.
         modules = list(self.get_bert_all_layers(self.model))
         layer_param_sizes = []
 
@@ -306,13 +400,13 @@ class PolarTrainer:
                 loss.backward()
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
+
                 part_rank = current_local_step % args.local_steps
-                
+
                 self.gradient_collector.register_hook(part_rank)
-                
+
                 current_local_step += 1
-                need_sync = (current_local_step % args.local_steps == 0) or ( 
+                need_sync = (current_local_step % args.local_steps == 0) or (
                     batch_idx + 1 == len(self.train_dataloader)
                 )
 
@@ -472,16 +566,28 @@ def _train(args: argparse.Namespace, inter_group, local_group):
 
 def process_group_setup():
     # init the global process group
-    rank = os.environ["RANK"]
-    local_rank = os.environ["LOCAL_RANK"]
-    world_size = os.environ["WORLD_SIZE"]
+    rank = os.getenv("RANK", "0")
+    local_rank = os.getenv("LOCAL_RANK", "0")
+    world_size = os.getenv("WORLD_SIZE", "1")
     rank = int(rank)
     local_rank = int(local_rank)
     world_size = int(world_size)
 
+    if world_size == 1:
+        global_group = dist.init_process_group(
+            backend="gloo",
+            init_method="tcp://127.0.0.1:23456",
+            rank=rank,
+            world_size=world_size,
+        )
+        local_group = global_group
+        inter_group = global_group
+        return global_group, inter_group, local_group
+
     print(f"rank: {rank}, local_rank: {local_rank}, world_size: {world_size}")
 
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     global_group = dist.init_process_group(
         backend="nccl",
         init_method="env://",
