@@ -66,43 +66,72 @@ class PolarCommHook:
 
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
-        if self.rank:
-            self.manage_hook_handle[self.rank - 1].remove()
-            self.manage_hook_handle[self.rank - 1] = None
-
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
-        # for layer, grad in zip(self.partitions[self.rank], self.grads[self.rank]):
-        #     self.grads += layer.grad
         for i in range(len(self.partitions[self.rank])):
-            self.grads[self.rank][i] += self.partitions[self.rank][i].grad
-            
+            # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
+            for param in self.partitions[self.rank][i].parameters():
+                if param.grad is not None:
+                    self.grads[self.rank][i] += param.grad
+
+        # If current iteration matches the current partition which this hook is attached to,
+        # then we calculate the prediction of the gradients and all_reduce them.
         if self.iterations == self.rank:
-            # self.grads = [p.grad.copy() for p in self.partitions[self.rank]]
-            self.grads_pred[self.rank] = (
-                self.grads[self.rank] * len(self.partitions) / self.rank + self.errors[self.rank]
-            )
-            self.flattened_grad_pred, self.num_tensors_per_list, self.tensor_sizes, self.original_shapes = self.flatten_nested_tensor_list(self.grads_pred[self.rank])  
-            self.tensor_buffer = TensorBuffer(self.grads)
+            # The prediction of the gradient is: pred_func(current_accumulated_gradients) + previous_sync_error.
+            scale = len(self.partitions) / (self.rank + 1)
+            self.grads_pred[self.rank] = [
+                [
+                    g * scale + e
+                    for g, e in zip(layer_g, layer_e)
+                ]
+                for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank])
+            ]
+            # flatten the partition: List[List[Tensor]] -> Tensor
+            (
+                self.flattened_grad_pred,
+                self.num_tensors_per_list,
+                self.tensor_sizes,
+                self.original_shapes,
+            ) = self.flatten_nested_tensor_list(self.grads_pred[self.rank])
+
             comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, async_op=True, group=self.inter_group
             )
             self.comm_works[self.rank] = comm_handle
 
         if self.iterations == len(self.partitions) - 1:
-            self.errors = self.grads[self.rank] - self.grads_pred[self.rank]
+            self.errors = [
+                [
+                    g - p for g, p in zip(layer_g, layer_p)
+                ]
+                for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
+            ]
             self.comm_works[self.rank].wait()
-            self.grads_pred[self.rank] = self.reshape(self.flattened_grad_pred, self.num_tensors_per_list, self.tensor_sizes, self.original_shapes)
-            all_reduce_fix = self.grads[self.rank] - self.grads_pred[self.rank]
-            for i in range(len(self.partitions[self.rank])):
-                self.partitions[self.rank][i].params.grad = self.partitions[self.rank][i].params.grad - all_reduce_fix[i]
+            self.grads_pred[self.rank] = self.unflatten_nested_tensor_list(
+                self.flattened_grad_pred,
+                self.num_tensors_per_list,
+                self.tensor_sizes,
+                self.original_shapes,
+            )
             
+            all_reduce_fix = [
+                [g - p for g, p in zip(layer_g, layer_p)]
+                for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
+            ]
+            for i in range(len(self.partitions[self.rank])):
+                for p, p_pred in zip(self.partitions[self.rank][i].parameters(), all_reduce_fix[i]):
+                    if p.grad is not None:
+                        p.grad = p.grad - p_pred
+
         self.iterations += 1
         self.iterations %= len(self.partitions)
-        
-    def flatten_nested_tensor_list(nested_list: List[List[torch.Tensor]]) -> tuple[torch.Tensor, List[int], List[int], List[List[torch.Size]]]:
+
+    def flatten_nested_tensor_list(
+        self,
+        nested_list: List[List[torch.Tensor]],
+    ) -> tuple[torch.Tensor, List[int], List[int], List[List[torch.Size]]]:
         # 压平内层 List[torch.Tensor] 并记录结构
         flattened_tensors = []
-        tensor_sizes = []       # 存储每个 Tensor 的元素数量
+        tensor_sizes = []  # 存储每个 Tensor 的元素数量
         num_tensors_per_list = []  # 存储每个子列表的 Tensor 数量
 
         for sublist in nested_list:
@@ -114,16 +143,17 @@ class PolarCommHook:
 
         # 将所有 Tensor 拼接成一个 1D Tensor
         final_flattened = torch.cat(flattened_tensors)
-        
+
         original_shapes = [[t.shape for t in sublist] for sublist in nested_list]
-        
+
         return final_flattened, num_tensors_per_list, tensor_sizes, original_shapes
 
     def unflatten_nested_tensor_list(
+        self,
         flattened: torch.Tensor,
         num_tensors_per_list: List[int],
         tensor_sizes: List[int],
-        original_shapes: List[List[tuple]]  # 需额外传入原始形状
+        original_shapes: List[List[tuple]],  # 需额外传入原始形状
     ) -> List[List[torch.Tensor]]:
         # Step 1: 按 tensor_sizes 切分 1D Tensor
         split_tensors = torch.split(flattened, tensor_sizes)
@@ -140,6 +170,7 @@ class PolarCommHook:
             restored_tensors.append(current_group)
 
         return restored_tensors
+
 
 class NativePolarGradientCollector:
     """
@@ -166,18 +197,30 @@ class NativePolarGradientCollector:
         self.comm_works = [None for _ in range(len(self.partitions))]
         # self.send_buffer = send_buffer
         self.grads_accumulation = [
-            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            [
+                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                for layer in partition
+            ]
             for partition in self.partitions
         ]
         self.grads_pred = [
-            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            [
+                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                for layer in partition
+            ]
             for partition in self.partitions
         ]
         # self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
         self.errors = [
-            [[torch.zeros_like(p) for p in layer.parameters()] for layer in partition]
+            [
+                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                for layer in partition
+            ]
             for partition in self.partitions
         ]
+        # print(self.grads_accumulation[0][0][0].device)
+        # print(self.grads_pred[0][0][0].device)
+        # print(self.errors[0][0][0].device)
 
     def register_hook(self):
         """Register hook to the first layer of the partition.
@@ -241,22 +284,25 @@ class PolarTrainer:
         device=None,
         tokenizer=None,
     ):
+        self.args = args
         self.local_group = local_group
         self.inter_group = inter_group
-        self.device = device or torch.device(
+        self.device = torch.device(
             f"cuda:{dist.get_rank(group=self.local_group)}"
         )
         if args.pretrained:
             self.model = model or AutoModelForSequenceClassification.from_pretrained(
                 args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
             )
-            self.model.to(device)
+            self.model.to(self.device)
+            print(next(self.model.parameters()).device)
         else:
             config = AutoConfig.from_pretrained(
                 args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
             )
             self.model = model or AutoModelForSequenceClassification.from_config(config)
-            self.model.to(device)
+            self.model.to(self.device)
+            print(next(self.model.parameters()).device)
 
         self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
         self.dataset = load_from_disk(args.data_path)
@@ -275,6 +321,7 @@ class PolarTrainer:
         tokenized_dataset.set_format("torch")
         self.tokenized_dataset = tokenized_dataset
 
+        print(next(self.model.parameters()).device)
         self.model_partitions = None
         if args.model == "bert-base-uncased":
             self.model_partitions = self.split_bert_based_model_into_partitions(
@@ -284,6 +331,7 @@ class PolarTrainer:
             raise NotImplementedError(
                 "Only BERT-based models are supported for partitioning at the moment."
             )
+        print(next(self.model_partitions[0][0].parameters()).device)
 
         train_sampler = DistributedSampler(
             tokenized_dataset["train"],
@@ -341,7 +389,7 @@ class PolarTrainer:
             if isinstance(child, torch.nn.Dropout):
                 yield child
 
-    def split_bert_based_model_into_partitions(self, num_partitions):
+    def split_bert_based_model_into_partitions(self, num_partitions: int):
         # TODO: the module list need to reverse.
         modules = list(self.get_bert_all_layers(self.model))
         layer_param_sizes = []
@@ -378,7 +426,7 @@ class PolarTrainer:
 
         return partitions
 
-    def train(self, args):
+    def train(self):
         # send_buffers = [
         #     torch.zeros_like(param)
         #     for param in self.model.parameters()
@@ -387,9 +435,9 @@ class PolarTrainer:
         print("send_buffers")
         LOCAL_STEPS = 1  # 每4个batch同步一次梯度
         current_local_step = 0  # 当前本地步数计数器
-        print(f"LOCAL_STEPS: {args.local_steps}")
+        print(f"LOCAL_STEPS: {self.args.local_steps}")
         # 训练循环
-        for epoch in range(args.epochs):
+        for epoch in range(self.args.epochs):
             self.model.train()
             total_loss = 0
             progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
@@ -401,167 +449,19 @@ class PolarTrainer:
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-                part_rank = current_local_step % args.local_steps
-
-                self.gradient_collector.register_hook(part_rank)
+                part_rank = current_local_step % self.args.local_steps
 
                 current_local_step += 1
-                need_sync = (current_local_step % args.local_steps == 0) or (
-                    batch_idx + 1 == len(self.train_dataloader)
-                )
 
-                if need_sync:
-                    grad_vec = [
-                        parameter.grad
-                        for parameter in self.model.parameters()
-                        if parameter.requires_grad
-                    ]
-                    for grad, send_buffer in zip(grad_vec, send_buffers):
-                        send_buffer[:] = grad
-
-                    tensor_buffer = TensorBuffer(send_buffers)
-                    flat_buffer = tensor_buffer.buffer
-                    dist.all_reduce(flat_buffer)
-                    tensor_buffer.buffer = flat_buffer
-                    grads = tensor_buffer.deflatten()
-
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad()
-
-                else:
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
 
                 total_loss += loss.item()
                 progress_bar.set_postfix({"loss": loss.item()})
 
             avg_train_loss = total_loss / len(self.train_dataloader)
             print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
-
-
-def _train(args: argparse.Namespace, inter_group, local_group):
-    local_rank = dist.get_rank(group=local_group)
-    if local_rank < 0:
-        logger.error("local_rank is less than 0, check the local_group initialization.")
-        return
-    device = torch.device(f"cuda:{local_rank}")
-
-    dataset = load_from_disk(args.data_path)
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
-
-    def tokenize_function(examples):
-        return tokenizer(
-            examples["sentence"],
-            padding="max_length",
-            truncation=True,
-            max_length=args.max_length,
-        )
-
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
-    tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
-    tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
-    tokenized_dataset.set_format("torch")
-
-    train_sampler = DistributedSampler(
-        tokenized_dataset["train"],
-        num_replicas=dist.get_world_size(),
-        rank=dist.get_rank(),
-        shuffle=True,
-    )
-
-    eval_sampler = DistributedSampler(
-        tokenized_dataset["validation"],
-        num_replicas=dist.get_world_size(),
-        rank=dist.get_rank(),
-        shuffle=False,
-    )
-
-    train_dataloader = DataLoader(
-        tokenized_dataset["train"], batch_size=args.batch_size, sampler=train_sampler
-    )
-
-    eval_dataloader = DataLoader(
-        tokenized_dataset["validation"],
-        batch_size=args.batch_size,
-        sampler=eval_sampler,
-    )
-
-    if args.pretrained:
-        model = AutoModelForSequenceClassification.from_pretrained(
-            args.epochs, torch_dtype=torch.float16, num_labels=args.num_labels
-        )
-    else:
-        from transformers import AutoConfig
-
-        config = AutoConfig.from_pretrained(
-            args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
-        )
-        model = AutoModelForSequenceClassification.from_config(config)
-
-    model.to(device)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    total_steps = len(train_dataloader) * args.epochs
-
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=0.1 * total_steps, num_training_steps=total_steps
-    )
-
-    send_buffers = [
-        torch.zeros_like(param) for param in model.parameters() if param.requires_grad
-    ]
-    print("send_buffers")
-    LOCAL_STEPS = 1  # 每4个batch同步一次梯度
-    current_local_step = 0  # 当前本地步数计数器
-    print(f"LOCAL_STEPS: {args.local_steps}")
-    # 训练循环
-    for epoch in range(args.epochs):
-        model.train()
-        total_loss = 0
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}")
-
-        for batch_idx, batch in enumerate(progress_bar):
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            loss.backward()
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            current_local_step += 1
-            need_sync = (current_local_step % args.local_steps == 0) or (
-                batch_idx + 1 == len(train_dataloader)
-            )
-
-            if need_sync:
-                grad_vec = [
-                    parameter.grad
-                    for parameter in model.parameters()
-                    if parameter.requires_grad
-                ]
-                for grad, send_buffer in zip(grad_vec, send_buffers):
-                    send_buffer[:] = grad
-
-                tensor_buffer = TensorBuffer(send_buffers)
-                flat_buffer = tensor_buffer.buffer
-                dist.all_reduce(flat_buffer)
-                tensor_buffer.buffer = flat_buffer
-                grads = tensor_buffer.deflatten()
-
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-            else:
-                optimizer.step()
-                optimizer.zero_grad()
-
-            total_loss += loss.item()
-            progress_bar.set_postfix({"loss": loss.item()})
-
-        avg_train_loss = total_loss / len(train_dataloader)
-        print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
 
 
 def process_group_setup():
@@ -574,15 +474,27 @@ def process_group_setup():
     world_size = int(world_size)
 
     if world_size == 1:
-        global_group = dist.init_process_group(
-            backend="gloo",
-            init_method="tcp://127.0.0.1:23456",
-            rank=rank,
-            world_size=world_size,
-        )
-        local_group = global_group
-        inter_group = global_group
-        return global_group, inter_group, local_group
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            global_group = dist.init_process_group(
+                backend="nccl",
+                init_method="tcp://127.0.0.1:23456",
+                rank=rank,
+                world_size=world_size,
+            )
+            local_group = global_group
+            inter_group = global_group
+            return global_group, inter_group, local_group
+        else:
+            global_group = dist.init_process_group(
+                backend="gloo",
+                init_method="tcp://127.0.0.1:23456",
+                rank=rank,
+                world_size=world_size,
+            )
+            local_group = global_group
+            inter_group = global_group
+            return global_group, inter_group, local_group
 
     print(f"rank: {rank}, local_rank: {local_rank}, world_size: {world_size}")
 

@@ -93,3 +93,30 @@ config = AutoConfig.from_pretrained(
 model = AutoModelForSequenceClassification.from_config(config)
 
 trainer = PolarTrainer(args=args, inter_group=inter_group, local_group=local_group, model=model)
+
+trainer.train()
+
+def find_hooked_layers(model: torch.nn.Module):
+    hooked_layers = []
+
+    # 递归遍历所有子模块
+    for name, layer in model.named_modules():
+        has_hook = False
+        hook_types = []
+        
+        # 检查三类钩子是否存在
+        if hasattr(layer, '_forward_pre_hooks') and layer._forward_pre_hooks:
+            has_hook = True
+            hook_types.append("forward_pre_hook")
+        if hasattr(layer, '_forward_hooks') and layer._forward_hooks:
+            has_hook = True
+            hook_types.append("forward_hook")
+        if hasattr(layer, '_backward_hooks') and layer._backward_hooks:
+            has_hook = True
+            hook_types.append("backward_hook")
+        
+        # 记录带钩子的层信息
+        if has_hook:
+            hooked_layers.append((name, layer, hook_types))
+    
+    return hooked_layers
