@@ -63,15 +63,27 @@ class PolarCommHook:
         # self.tensor_buffer = tensor_buffer
         self.iterations = 0
         self.errors = errors
+        
+        for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank]):
+            for g, e in zip(layer_g, layer_e):
+                if g.shape != e.shape:
+                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
 
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
+        for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank]):
+            for g, e in zip(layer_g, layer_e):
+                if g.shape != e.shape:
+                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
+        print(self.iterations)
         for i in range(len(self.partitions[self.rank])):
             # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
-            for param in self.partitions[self.rank][i].parameters():
+            for param, grads in zip(self.partitions[self.rank][i].parameters(), self.grads[self.rank][i]):
+                if g.shape != e.shape:
+                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
                 if param.grad is not None:
-                    self.grads[self.rank][i] += param.grad
+                    grads.add_(param.grad)
 
         # If current iteration matches the current partition which this hook is attached to,
         # then we calculate the prediction of the gradients and all_reduce them.
