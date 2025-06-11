@@ -82,6 +82,7 @@ parser.add_argument("--lr", type=float, default=1e-5)
 parser.add_argument("--epochs", type=int, default=3)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--local_steps", type=int, default=1, help="local steps")
+parser.add_argument("--using_hook", type=bool, default=True)
 
 args = parser.parse_args()
 
@@ -94,7 +95,8 @@ model = AutoModelForSequenceClassification.from_config(config)
 
 trainer = PolarTrainer(args=args, inter_group=inter_group, local_group=local_group, model=model)
 
-trainer.train()
+trainer._train()
+# trainer.train()
 
 def find_hooked_layers(model: torch.nn.Module):
     hooked_layers = []

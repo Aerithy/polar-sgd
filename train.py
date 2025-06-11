@@ -63,27 +63,24 @@ class PolarCommHook:
         # self.tensor_buffer = tensor_buffer
         self.iterations = 0
         self.errors = errors
-        
-        for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank]):
-            for g, e in zip(layer_g, layer_e):
-                if g.shape != e.shape:
-                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
 
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
-        for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank]):
-            for g, e in zip(layer_g, layer_e):
-                if g.shape != e.shape:
-                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
         print(self.iterations)
+        device = self.partitions[self.rank][0].parameters().__next__().device
         for i in range(len(self.partitions[self.rank])):
             # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
-            for param, grads in zip(self.partitions[self.rank][i].parameters(), self.grads[self.rank][i]):
-                if g.shape != e.shape:
-                    raise RuntimeError(f"Shape mismatch! Grad shape: {g.shape}, Error shape: {e.shape}")
+            for j, param in enumerate(self.partitions[self.rank][i].parameters()):
                 if param.grad is not None:
-                    grads.add_(param.grad)
+                    # print(param.grad)
+                    if self.grads[self.rank][i][j] is None:
+                        self.grads[self.rank][i][j] = torch.zeros_like(param.grad)
+                        # print(self.grads[self.rank][i][j])
+                    self.grads[self.rank][i][j].add_(param.grad)
+                    # print(self.grads[self.rank][i][j])
+                
+        print(self.grads[self.rank])
 
         # If current iteration matches the current partition which this hook is attached to,
         # then we calculate the prediction of the gradients and all_reduce them.
@@ -92,7 +89,7 @@ class PolarCommHook:
             scale = len(self.partitions) / (self.rank + 1)
             self.grads_pred[self.rank] = [
                 [
-                    g * scale + e
+                    g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
                     for g, e in zip(layer_g, layer_e)
                 ]
                 for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank])
@@ -149,7 +146,7 @@ class PolarCommHook:
         for sublist in nested_list:
             num_tensors_per_list.append(len(sublist))  # 记录当前子列表的 Tensor 数量
             for tensor in sublist:
-                flattened = tensor.flatten()  # 压平当前 Tensor
+                flattened = tensor.flatten() if tensor is not None else None # 压平当前 Tensor
                 tensor_sizes.append(flattened.numel())  # 记录元素数量
                 flattened_tensors.append(flattened)
 
@@ -210,14 +207,14 @@ class NativePolarGradientCollector:
         # self.send_buffer = send_buffer
         self.grads_accumulation = [
             [
-                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                [None for p in layer.parameters()]
                 for layer in partition
             ]
             for partition in self.partitions
         ]
         self.grads_pred = [
             [
-                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                [None for p in layer.parameters()]
                 for layer in partition
             ]
             for partition in self.partitions
@@ -225,7 +222,7 @@ class NativePolarGradientCollector:
         # self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
         self.errors = [
             [
-                [torch.zeros_like(p, device=p.device) for p in layer.parameters()]
+                [None for p in layer.parameters()]
                 for layer in partition
             ]
             for partition in self.partitions
@@ -380,25 +377,15 @@ class PolarTrainer:
             local_group=self.local_group,
             partitions=self.model_partitions,
         )
-        self.gradient_collector.register_hook()
+        if args.using_hook:
+            self.gradient_collector.register_hook()
 
     def get_bert_all_layers(self, module: torch.nn.Module):
-        for name, child in module.named_children():
-            if isinstance(child, BertModel):
-                yield from self.get_bert_all_layers(child)
-            if isinstance(child, BertEncoder):
-                yield from self.get_bert_all_layers(child)
-            if isinstance(child, torch.nn.ModuleList):
-                yield from self.get_bert_all_layers(child)
-            if isinstance(child, BertEmbeddings):
-                yield child
-            if isinstance(child, BertLayer):
-                yield child
-            if isinstance(child, BertPooler):
-                yield child
-            if isinstance(child, torch.nn.Linear):
-                yield child
-            if isinstance(child, torch.nn.Dropout):
+        # 遍历模块的所有子模块
+        for child in module.modules():
+            if isinstance(child, (BertModel, BertEncoder, torch.nn.ModuleList)):
+                continue  # 跳过容器类模块，避免重复处理
+            if isinstance(child, (BertEmbeddings, BertLayer, BertPooler, torch.nn.Linear, torch.nn.Dropout)):
                 yield child
 
     def split_bert_based_model_into_partitions(self, num_partitions: int):
@@ -439,6 +426,43 @@ class PolarTrainer:
         return partitions
 
     def train(self):
+        # send_buffers = [
+        #     torch.zeros_like(param)
+        #     for param in self.model.parameters()
+        #     if param.requires_grad
+        # ]
+        print("send_buffers")
+        LOCAL_STEPS = 1  # 每4个batch同步一次梯度
+        current_local_step = 0  # 当前本地步数计数器
+        print(f"LOCAL_STEPS: {self.args.local_steps}")
+        # 训练循环
+        for epoch in range(self.args.epochs):
+            self.model.train()
+            total_loss = 0
+            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
+            for batch_idx, batch in enumerate(progress_bar):
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                outputs = self.model(**batch)
+                loss = outputs.loss
+                loss.backward()
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                part_rank = current_local_step % self.args.local_steps
+
+                current_local_step += 1
+
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+
+                total_loss += loss.item()
+                progress_bar.set_postfix({"loss": loss.item()})
+
+            avg_train_loss = total_loss / len(self.train_dataloader)
+            print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
+            
+    def _train(self):
         # send_buffers = [
         #     torch.zeros_like(param)
         #     for param in self.model.parameters()
