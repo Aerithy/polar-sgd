@@ -67,7 +67,7 @@ class PolarCommHook:
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
-        print(self.iterations)
+        # print("iterations: ", self.iterations)
         device = self.partitions[self.rank][0].parameters().__next__().device
         for i in range(len(self.partitions[self.rank])):
             # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
@@ -80,12 +80,15 @@ class PolarCommHook:
                     self.grads[self.rank][i][j].add_(param.grad)
                     # print(self.grads[self.rank][i][j])
                 
-        print(self.grads[self.rank])
+        # print(self.grads[self.rank])
 
         # If current iteration matches the current partition which this hook is attached to,
         # then we calculate the prediction of the gradients and all_reduce them.
         if self.iterations == self.rank:
             # The prediction of the gradient is: pred_func(current_accumulated_gradients) + previous_sync_error.
+            # print("Current iteration matches the current partition which this hook is attached to.")
+            # print("len of grads: ", len(self.grads[self.rank]))
+            # print("len of errors: ", len(self.errors[self.rank]))
             scale = len(self.partitions) / (self.rank + 1)
             self.grads_pred[self.rank] = [
                 [
@@ -108,12 +111,15 @@ class PolarCommHook:
             self.comm_works[self.rank] = comm_handle
 
         if self.iterations == len(self.partitions) - 1:
-            self.errors = [
+            # print("Current iteration is the last iteration of this update cycle.")
+            self.errors[self.rank] = [
                 [
-                    g - p for g, p in zip(layer_g, layer_p)
+                    g - p if g is not None and p is not None else torch.zeros(1, device=device)
+                    for g, p in zip(layer_g, layer_p) 
                 ]
                 for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
             ]
+            # print("len of errors: ", len(self.errors[self.rank]))
             self.comm_works[self.rank].wait()
             self.grads_pred[self.rank] = self.unflatten_nested_tensor_list(
                 self.flattened_grad_pred,
@@ -122,13 +128,20 @@ class PolarCommHook:
                 self.original_shapes,
             )
             
+            # print("len of grads: ", len(self.grads[self.rank]))
+            # print("len of grads_pred: ", len(self.grads_pred[self.rank]))
             all_reduce_fix = [
-                [g - p for g, p in zip(layer_g, layer_p)]
+                [
+                    g - p if g is not None and p is not None else torch.zeros(1, device=device)
+                    for g, p in zip(layer_g, layer_p)
+                ]
                 for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
             ]
+            # print(len(all_reduce_fix), len(self.grads[self.rank]))
             for i in range(len(self.partitions[self.rank])):
                 for p, p_pred in zip(self.partitions[self.rank][i].parameters(), all_reduce_fix[i]):
                     if p.grad is not None:
+                        p_pred = p_pred.to(p.grad.dtype)
                         p.grad = p.grad - p_pred
 
         self.iterations += 1
