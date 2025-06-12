@@ -83,6 +83,7 @@ parser.add_argument("--epochs", type=int, default=3)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--local_steps", type=int, default=1, help="local steps")
 parser.add_argument("--using_hook", type=bool, default=True)
+parser.add_argument("--single_node", type=bool, default=True)
 
 args = parser.parse_args()
 

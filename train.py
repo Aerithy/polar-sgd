@@ -82,33 +82,31 @@ class PolarCommHook:
                 
         # print(self.grads[self.rank])
 
-        # If current iteration matches the current partition which this hook is attached to,
-        # then we calculate the prediction of the gradients and all_reduce them.
-        if self.iterations == self.rank:
-            # The prediction of the gradient is: pred_func(current_accumulated_gradients) + previous_sync_error.
-            # print("Current iteration matches the current partition which this hook is attached to.")
-            # print("len of grads: ", len(self.grads[self.rank]))
-            # print("len of errors: ", len(self.errors[self.rank]))
-            scale = len(self.partitions) / (self.rank + 1)
-            self.grads_pred[self.rank] = [
-                [
-                    g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
-                    for g, e in zip(layer_g, layer_e)
-                ]
-                for layer_g, layer_e in zip(self.grads[self.rank], self.errors[self.rank])
+        """_summary_
+        doing broadcast, node [rank] will broadcast the [rank]th partition's gradients to all other nodes
+        """
+        scale = len(self.partitions) / (self.rank + 1)
+        self.grads_pred[self.iterations] = [
+            [
+                g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
+                for g, e in zip(layer_g, layer_e)
             ]
-            # flatten the partition: List[List[Tensor]] -> Tensor
-            (
-                self.flattened_grad_pred,
-                self.num_tensors_per_list,
-                self.tensor_sizes,
-                self.original_shapes,
-            ) = self.flatten_nested_tensor_list(self.grads_pred[self.rank])
+            for layer_g, layer_e in zip(self.grads[self.iterations], self.errors[self.iterations])
+        ]
+        (
+            self.flattened_grad_pred,
+            self.num_tensors_per_list,
+            self.tensor_sizes,
+            self.original_shapes,
+        ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
 
-            comm_handle = dist.all_reduce(
-                self.flattened_grad_pred, async_op=True, group=self.inter_group
-            )
-            self.comm_works[self.rank] = comm_handle
+        # comm_handle = dist.all_reduce(
+        #     self.flattened_grad_pred, async_op=True, group=self.inter_group
+        # )
+        comm_handle = dist.broadcast(
+            self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
+        )
+        self.comm_works[self.iterations] = comm_handle
 
         if self.iterations == len(self.partitions) - 1:
             # print("Current iteration is the last iteration of this update cycle.")
@@ -386,7 +384,7 @@ class PolarTrainer:
         )
         self.grad_partitions_bucket = []
         self.gradient_collector = NativePolarGradientCollector(
-            inter_group=self.inter_group,
+            inter_group=self.inter_group if not args.single_node else self.local_group,
             local_group=self.local_group,
             partitions=self.model_partitions,
         )
