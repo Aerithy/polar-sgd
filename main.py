@@ -79,9 +79,9 @@ parser.add_argument(
 )
 parser.add_argument("--batch_size", type=int, default=16)
 parser.add_argument("--lr", type=float, default=1e-5)
-parser.add_argument("--epochs", type=int, default=3)
+parser.add_argument("--epochs", type=int, default=10)
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--local_steps", type=int, default=1, help="local steps")
+parser.add_argument("--local_steps", type=int, default=2, help="local steps")
 parser.add_argument("--using_hook", type=bool, default=True)
 parser.add_argument("--single_node", type=bool, default=True)
 

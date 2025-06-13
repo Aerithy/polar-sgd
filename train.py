@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class PolarCommHook:
     def __init__(
         self,
-        rank: int,
+        partition_id: int,
         partitions: List[List[torch.nn.Module]],
         inter_group: torch.distributed.ProcessGroup,
         local_group: torch.distributed.ProcessGroup,
@@ -52,7 +52,7 @@ class PolarCommHook:
         # tensor_buffer (TensorBuffer): TensorBuffer object to store the gradients.
         iterations (int): Currently batch iterations.
         """
-        self.rank = rank
+        self.partition_id = partition_id
         self.partitions = partitions
         self.inter_group = inter_group
         self.local_group = local_group
@@ -68,76 +68,92 @@ class PolarCommHook:
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
         # print("iterations: ", self.iterations)
-        device = self.partitions[self.rank][0].parameters().__next__().device
-        for i in range(len(self.partitions[self.rank])):
+        device = self.partitions[self.partition_id][0].parameters().__next__().device
+        for i in range(len(self.partitions[self.partition_id])):
             # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
-            for j, param in enumerate(self.partitions[self.rank][i].parameters()):
+            for j, param in enumerate(self.partitions[self.partition_id][i].parameters()):
                 if param.grad is not None:
                     # print(param.grad)
-                    if self.grads[self.rank][i][j] is None:
-                        self.grads[self.rank][i][j] = torch.zeros_like(param.grad)
+                    if self.grads[self.partition_id][i][j] is None:
+                        self.grads[self.partition_id][i][j] = torch.zeros_like(param.grad)
                         # print(self.grads[self.rank][i][j])
-                    self.grads[self.rank][i][j].add_(param.grad)
+                    self.grads[self.partition_id][i][j].add_(param.grad)
                     # print(self.grads[self.rank][i][j])
                 
         # print(self.grads[self.rank])
 
         """_summary_
         doing broadcast, node [rank] will broadcast the [rank]th partition's gradients to all other nodes
+         0   1   2   3 
+        {0}  1   2   3 iter_0
         """
-        scale = len(self.partitions) / (self.rank + 1)
-        self.grads_pred[self.iterations] = [
-            [
-                g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
-                for g, e in zip(layer_g, layer_e)
+        if self.partition_id == self.iterations:
+            scale = len(self.partitions) / (self.partition_id + 1)
+            self.grads_pred[self.iterations] = [
+                [
+                    g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
+                    for g, e in zip(layer_g, layer_e)
+                ]
+                for layer_g, layer_e in zip(self.grads[self.iterations], self.errors[self.iterations])
             ]
-            for layer_g, layer_e in zip(self.grads[self.iterations], self.errors[self.iterations])
-        ]
-        (
-            self.flattened_grad_pred,
-            self.num_tensors_per_list,
-            self.tensor_sizes,
-            self.original_shapes,
-        ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
+            # print("rank ", self.partition_id, " grad_pred len is: ", len(self.grads_pred[self.iterations]))
+            # print("rank ", self.partition_id, " grad len is: ", len(self.grads[self.iterations]))
+            # print("rank ", self.partition_id, " error len is: ", len(self.errors[self.iterations]))
+            (
+                self.flattened_grad_pred,
+                self.num_tensors_per_list,
+                self.tensor_sizes,
+                self.original_shapes,
+            ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
 
-        # comm_handle = dist.all_reduce(
-        #     self.flattened_grad_pred, async_op=True, group=self.inter_group
-        # )
-        comm_handle = dist.broadcast(
-            self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
-        )
-        self.comm_works[self.iterations] = comm_handle
+            # comm_handle = dist.all_reduce(
+            #     self.flattened_grad_pred, async_op=True, group=self.inter_group
+            # )
+            comm_handle = dist.broadcast(
+                self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
+            )
+            self.comm_works[self.iterations] = comm_handle
+        
+        # for grad in self.grads:
+        #     print(f'{len(grad)}, ')
 
         if self.iterations == len(self.partitions) - 1:
-            # print("Current iteration is the last iteration of this update cycle.")
-            self.errors[self.rank] = [
+            # if dist.get_rank(self.inter_group) == 0:
+            #     print("Current iteration is the last iteration of this update cycle.")
+            self.errors[self.partition_id] = [
                 [
                     g - p if g is not None and p is not None else torch.zeros(1, device=device)
                     for g, p in zip(layer_g, layer_p) 
                 ]
-                for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
+                for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
-            # print("len of errors: ", len(self.errors[self.rank]))
-            self.comm_works[self.rank].wait()
-            self.grads_pred[self.rank] = self.unflatten_nested_tensor_list(
+            # if dist.get_rank(self.inter_group) == 0:
+            #     print("rank ", self.partition_id, " len of errors: ", len(self.errors[self.partition_id]))
+            #     print("rank ", self.partition_id, " len of grads: ", len(self.grads[self.partition_id]))
+            #     print("rank ", self.partition_id, " len of grads_pred: ", len(self.grads_pred[self.partition_id]))
+            self.comm_works[self.partition_id].wait()
+            self.grads_pred[self.partition_id] = self.unflatten_nested_tensor_list(
                 self.flattened_grad_pred,
                 self.num_tensors_per_list,
                 self.tensor_sizes,
                 self.original_shapes,
             )
             
-            # print("len of grads: ", len(self.grads[self.rank]))
-            # print("len of grads_pred: ", len(self.grads_pred[self.rank]))
+            # if dist.get_rank(self.inter_group) == 0:
+            #     print("rank ", self.partition_id, " len of grads: ", len(self.grads[self.partition_id]))
+            #     print("rank ", self.partition_id, " len of grads_pred: ", len(self.grads_pred[self.partition_id]))
             all_reduce_fix = [
                 [
                     g - p if g is not None and p is not None else torch.zeros(1, device=device)
                     for g, p in zip(layer_g, layer_p)
                 ]
-                for layer_g, layer_p in zip(self.grads[self.rank], self.grads_pred[self.rank])
+                for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
-            # print(len(all_reduce_fix), len(self.grads[self.rank]))
-            for i in range(len(self.partitions[self.rank])):
-                for p, p_pred in zip(self.partitions[self.rank][i].parameters(), all_reduce_fix[i]):
+            
+            # if dist.get_rank(self.inter_group) == 0:
+            #     print(len(all_reduce_fix), len(self.grads[self.partition_id]))
+            for i in range(len(self.partitions[self.partition_id])):
+                for p, p_pred in zip(self.partitions[self.partition_id][i].parameters(), all_reduce_fix[i]):
                     if p.grad is not None:
                         p_pred = p_pred.to(p.grad.dtype)
                         p.grad = p.grad - p_pred
@@ -271,7 +287,7 @@ class NativePolarGradientCollector:
                 0
             ].register_full_backward_hook(
                 PolarCommHook(
-                    rank=rank,
+                    partition_id=rank,
                     partitions=self.partitions,
                     inter_group=self.inter_group,
                     local_group=self.local_group,
