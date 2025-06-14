@@ -432,41 +432,50 @@ class PolarTrainer:
         return partitions
 
     def train(self):
-        # send_buffers = [
-        #     torch.zeros_like(param)
-        #     for param in self.model.parameters()
-        #     if param.requires_grad
-        # ]
         print("send_buffers")
         LOCAL_STEPS = 1  # 每4个batch同步一次梯度
         current_local_step = 0  # 当前本地步数计数器
         print(f"LOCAL_STEPS: {self.args.local_steps}")
-        # 训练循环
-        for epoch in range(self.args.epochs):
-            self.model.train()
-            total_loss = 0
-            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
-            for batch_idx, batch in enumerate(progress_bar):
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                outputs = self.model(**batch)
-                loss = outputs.loss
-                loss.backward()
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-                part_rank = current_local_step % self.args.local_steps
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            profile_memory=True,
+            record_shapes=True,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
+            on_trace_ready=torch.profiler.chrome_trace_handler("./log/trace.json"),
+            with_stack=True,
+        ) as prof:
+            for epoch in range(self.args.epochs):
+                self.model.train()
+                total_loss = 0
+                progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
+                for batch_idx, batch in enumerate(progress_bar):
+                    batch = {k: v.to(self.device) for k, v in batch.items()}
+                    outputs = self.model(**batch)
+                    loss = outputs.loss
+                    loss.backward()
 
-                current_local_step += 1
+                    # 梯度裁剪
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
+                    part_rank = current_local_step % self.args.local_steps
+                    current_local_step += 1
 
-                total_loss += loss.item()
-                progress_bar.set_postfix({"loss": loss.item()})
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
 
-            avg_train_loss = total_loss / len(self.train_dataloader)
-            print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
+                    total_loss += loss.item()
+                    progress_bar.set_postfix({"loss": loss.item()})
+
+                    # 记录当前 step 到 profiler
+                    prof.step()
+
+                avg_train_loss = total_loss / len(self.train_dataloader)
+                print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
             
     def _train(self):
         # send_buffers = [
