@@ -49,7 +49,6 @@ class PolarCommHook:
         rank (int): Communication rank of the partitions.
         partitions (list): List of model partitions. Each partition is a list of layers.
         grads (list): List of gradients. These gradients are used to accumulate the parameter.grads.
-        # tensor_buffer (TensorBuffer): TensorBuffer object to store the gradients.
         iterations (int): Currently batch iterations.
         """
         self.partition_id = partition_id
@@ -96,9 +95,6 @@ class PolarCommHook:
                 ]
                 for layer_g, layer_e in zip(self.grads[self.iterations], self.errors[self.iterations])
             ]
-            # print("rank ", self.partition_id, " grad_pred len is: ", len(self.grads_pred[self.iterations]))
-            # print("rank ", self.partition_id, " grad len is: ", len(self.grads[self.iterations]))
-            # print("rank ", self.partition_id, " error len is: ", len(self.errors[self.iterations]))
             (
                 self.flattened_grad_pred,
                 self.num_tensors_per_list,
@@ -106,20 +102,12 @@ class PolarCommHook:
                 self.original_shapes,
             ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
 
-            # comm_handle = dist.all_reduce(
-            #     self.flattened_grad_pred, async_op=True, group=self.inter_group
-            # )
             comm_handle = dist.broadcast(
                 self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
             )
             self.comm_works[self.iterations] = comm_handle
-        
-        # for grad in self.grads:
-        #     print(f'{len(grad)}, ')
 
         if self.iterations == len(self.partitions) - 1:
-            # if dist.get_rank(self.inter_group) == 0:
-            #     print("Current iteration is the last iteration of this update cycle.")
             self.errors[self.partition_id] = [
                 [
                     g - p if g is not None and p is not None else torch.zeros(1, device=device)
@@ -127,10 +115,6 @@ class PolarCommHook:
                 ]
                 for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
-            # if dist.get_rank(self.inter_group) == 0:
-            #     print("rank ", self.partition_id, " len of errors: ", len(self.errors[self.partition_id]))
-            #     print("rank ", self.partition_id, " len of grads: ", len(self.grads[self.partition_id]))
-            #     print("rank ", self.partition_id, " len of grads_pred: ", len(self.grads_pred[self.partition_id]))
             self.comm_works[self.partition_id].wait()
             self.grads_pred[self.partition_id] = self.unflatten_nested_tensor_list(
                 self.flattened_grad_pred,
@@ -139,9 +123,6 @@ class PolarCommHook:
                 self.original_shapes,
             )
             
-            # if dist.get_rank(self.inter_group) == 0:
-            #     print("rank ", self.partition_id, " len of grads: ", len(self.grads[self.partition_id]))
-            #     print("rank ", self.partition_id, " len of grads_pred: ", len(self.grads_pred[self.partition_id]))
             all_reduce_fix = [
                 [
                     g - p if g is not None and p is not None else torch.zeros(1, device=device)
@@ -150,8 +131,6 @@ class PolarCommHook:
                 for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
             
-            # if dist.get_rank(self.inter_group) == 0:
-            #     print(len(all_reduce_fix), len(self.grads[self.partition_id]))
             for i in range(len(self.partitions[self.partition_id])):
                 for p, p_pred in zip(self.partitions[self.partition_id][i].parameters(), all_reduce_fix[i]):
                     if p.grad is not None:
@@ -165,19 +144,19 @@ class PolarCommHook:
         self,
         nested_list: List[List[torch.Tensor]],
     ) -> tuple[torch.Tensor, List[int], List[int], List[List[torch.Size]]]:
-        # 压平内层 List[torch.Tensor] 并记录结构
+        # 压平内层 List[torch.Tensor] 并记录结构 flatten each sublist of tensor (List[torch.Tensor]) and record structure of them
         flattened_tensors = []
-        tensor_sizes = []  # 存储每个 Tensor 的元素数量
-        num_tensors_per_list = []  # 存储每个子列表的 Tensor 数量
+        tensor_sizes = []  # 存储每个 Tensor 的元素数量 store the number of elements in each tensor
+        num_tensors_per_list = []  # 存储每个子列表的 Tensor 数量 store the number of tensors in each sublist
 
         for sublist in nested_list:
-            num_tensors_per_list.append(len(sublist))  # 记录当前子列表的 Tensor 数量
+            num_tensors_per_list.append(len(sublist))  # 记录当前子列表的 Tensor 数量 record the number of tensors in current sublist
             for tensor in sublist:
-                flattened = tensor.flatten() if tensor is not None else None # 压平当前 Tensor
-                tensor_sizes.append(flattened.numel())  # 记录元素数量
+                flattened = tensor.flatten() if tensor is not None else None # 压平当前 Tensor flatten the current Tensor
+                tensor_sizes.append(flattened.numel())  # 记录元素数量 record the number of elements
                 flattened_tensors.append(flattened)
 
-        # 将所有 Tensor 拼接成一个 1D Tensor
+        # 将所有 Tensor 拼接成一个 1D Tensor cat all tensor in to a 1D Tensor
         final_flattened = torch.cat(flattened_tensors)
 
         original_shapes = [[t.shape for t in sublist] for sublist in nested_list]
@@ -325,7 +304,7 @@ class PolarTrainer:
         self.inter_group = inter_group
         self.device = torch.device(
             f"cuda:{dist.get_rank(group=self.local_group)}"
-        )
+        ) if torch.cuda.is_available() else torch.device("cpu")
         if args.pretrained:
             self.model = model or AutoModelForSequenceClassification.from_pretrained(
                 args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
@@ -634,4 +613,4 @@ if __name__ == "__main__":
     global_group, inter_group, local_group = process_group_setup()
 
     logger.info("Starting training...")
-    _train(args=parser.parse_args(), inter_group=inter_group, local_group=local_group)
+    # _train(args=parser.parse_args(), inter_group=inter_group, local_group=local_group)

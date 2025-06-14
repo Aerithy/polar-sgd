@@ -25,26 +25,7 @@ from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
 
-from train import PolarTrainer, process_group_setup
-
-# list = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-#         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-#         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],]
-
-# class TestClass:
-    
-#     def __init__(self, list):
-#         self.list = list[::-1]
-    
-#     def get_list(self):
-#         for i in range(len(self.list)):
-#             for j in range(len(self.list[i])):
-#                 self.list[i].append(self.list[i][j] * 2)
-            
-# test_class = TestClass(list)
-# test_class.get_list()
-
-# print(list)
+from polar_trainer import PolarTrainer, process_group_setup
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -96,8 +77,7 @@ model = AutoModelForSequenceClassification.from_config(config)
 
 trainer = PolarTrainer(args=args, inter_group=inter_group, local_group=local_group, model=model)
 
-trainer._train()
-# trainer.train()
+trainer.train()
 
 def find_hooked_layers(model: torch.nn.Module):
     hooked_layers = []
