@@ -42,8 +42,8 @@ class PolarCommHook:
         comm_works: List[torch.distributed.Work],
         grads: List[List[torch.Tensor]],
         grads_pred: List[List[torch.Tensor]],
-        # tensor_buffer,
         errors: List[List[torch.Tensor]],
+        stream: torch.cuda.Stream,
     ):
         """
         rank (int): Communication rank of the partitions.
@@ -59,27 +59,22 @@ class PolarCommHook:
         self.grads = grads
         self.grads_pred = grads_pred
         self.flatten_grad_pred = None
-        # self.tensor_buffer = tensor_buffer
         self.iterations = 0
         self.errors = errors
+        self.stream = stream
+        self.comm_start_event = torch.cuda.Event(enable_timing=False)
+        self.comm_end_event = torch.cuda.Event(enable_timing=False)
 
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
         # For every iteration, self.grads is the accumulation of the previous partitions' gradients.
-        # print("iterations: ", self.iterations)
         device = self.partitions[self.partition_id][0].parameters().__next__().device
         for i in range(len(self.partitions[self.partition_id])):
-            # self.grads[self.rank][i] += self.partitions[self.rank][i].grad
             for j, param in enumerate(self.partitions[self.partition_id][i].parameters()):
                 if param.grad is not None:
-                    # print(param.grad)
                     if self.grads[self.partition_id][i][j] is None:
                         self.grads[self.partition_id][i][j] = torch.zeros_like(param.grad)
-                        # print(self.grads[self.rank][i][j])
                     self.grads[self.partition_id][i][j].add_(param.grad)
-                    # print(self.grads[self.rank][i][j])
-                
-        # print(self.grads[self.rank])
 
         """_summary_
         doing broadcast, node [rank] will broadcast the [rank]th partition's gradients to all other nodes
@@ -102,10 +97,16 @@ class PolarCommHook:
                 self.original_shapes,
             ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
 
-            comm_handle = dist.broadcast(
-                self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
-            )
-            self.comm_works[self.iterations] = comm_handle
+            with torch.cuda.stream(self.stream):
+                self.comm_start_event.record(self.stream)
+                dist.broadcast(
+                    self.flattened_grad_pred, src=self.iterations, group=self.local_group
+                )
+                self.comm_end_event.record(self.stream)
+            # comm_handle = dist.broadcast(
+            #     self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
+            # )
+            # self.comm_works[self.iterations] = comm_handle
 
         if self.iterations == len(self.partitions) - 1:
             self.errors[self.partition_id] = [
@@ -115,7 +116,9 @@ class PolarCommHook:
                 ]
                 for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
-            self.comm_works[self.partition_id].wait()
+            # self.comm_works[self.partition_id].wait()
+            self.comm_end_event.wait(stream=torch.cuda.default_stream())
+            self.comm_end_event.synchronize()
             self.grads_pred[self.partition_id] = self.unflatten_nested_tensor_list(
                 self.flattened_grad_pred,
                 self.num_tensors_per_list,
@@ -210,7 +213,6 @@ class NativePolarGradientCollector:
         self.partitions = partitions[::-1]
         self.comm_hook_handle = [None for _ in range(len(self.partitions))]
         self.comm_works = [None for _ in range(len(self.partitions))]
-        # self.send_buffer = send_buffer
         self.grads_accumulation = [
             [
                 [None for p in layer.parameters()]
@@ -225,7 +227,6 @@ class NativePolarGradientCollector:
             ]
             for partition in self.partitions
         ]
-        # self.tensor_buffers = [TensorBuffer(grad) for grad in self.grads]
         self.errors = [
             [
                 [None for p in layer.parameters()]
@@ -233,9 +234,6 @@ class NativePolarGradientCollector:
             ]
             for partition in self.partitions
         ]
-        # print(self.grads_accumulation[0][0][0].device)
-        # print(self.grads_pred[0][0][0].device)
-        # print(self.errors[0][0][0].device)
 
     def register_hook(self):
         """Register hook to the first layer of the partition.
@@ -261,6 +259,7 @@ class NativePolarGradientCollector:
             rank (int): Rank of the partition.
 
         """
+        comm_stream = torch.cuda.Stream()
         for rank in range(len(self.partitions)):
             self.comm_hook_handle[rank] = self.partitions[rank][
                 0
@@ -274,6 +273,7 @@ class NativePolarGradientCollector:
                     grads=self.grads_accumulation,
                     grads_pred=self.grads_pred,
                     errors=self.errors,
+                    stream=comm_stream,
                 )
             )
 
@@ -387,15 +387,13 @@ class PolarTrainer:
             self.gradient_collector.register_hook()
 
     def get_bert_all_layers(self, module: torch.nn.Module):
-        # 遍历模块的所有子模块
         for child in module.modules():
             if isinstance(child, (BertModel, BertEncoder, torch.nn.ModuleList)):
-                continue  # 跳过容器类模块，避免重复处理
+                continue
             if isinstance(child, (BertEmbeddings, BertLayer, BertPooler, torch.nn.Linear, torch.nn.Dropout)):
                 yield child
 
     def split_bert_based_model_into_partitions(self, num_partitions: int):
-        # TODO: the module list need to reverse.
         modules = list(self.get_bert_all_layers(self.model))
         layer_param_sizes = []
 
@@ -444,7 +442,7 @@ class PolarTrainer:
             ],
             profile_memory=True,
             record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
             on_trace_ready=torch.profiler.chrome_trace_handler("./log/trace.json"),
             with_stack=True,
         ) as prof:
@@ -472,17 +470,13 @@ class PolarTrainer:
                     progress_bar.set_postfix({"loss": loss.item()})
 
                     # 记录当前 step 到 profiler
-                    prof.step()
+                    if current_local_step % self.args.local_steps == 0:
+                        prof.step()
 
                 avg_train_loss = total_loss / len(self.train_dataloader)
                 print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
             
     def _train(self):
-        # send_buffers = [
-        #     torch.zeros_like(param)
-        #     for param in self.model.parameters()
-        #     if param.requires_grad
-        # ]
         print("send_buffers")
         LOCAL_STEPS = 1  # 每4个batch同步一次梯度
         current_local_step = 0  # 当前本地步数计数器
