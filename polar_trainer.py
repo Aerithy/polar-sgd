@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -64,6 +65,7 @@ class PolarCommHook:
         self.stream = stream
         self.comm_start_event = torch.cuda.Event(enable_timing=False)
         self.comm_end_event = torch.cuda.Event(enable_timing=False)
+        self.offset = 0
 
     def __call__(self, module, grad_input, grad_output):
         # If this is not the first partitions. Then remove the hook of the previous backward partitions.
@@ -81,32 +83,32 @@ class PolarCommHook:
          0   1   2   3 
         {0}  1   2   3 iter_0
         """
-        if self.partition_id == self.iterations:
+        if self.partition_id == (self.iterations + self.offset) % len(self.partitions):
             scale = len(self.partitions) / (self.partition_id + 1)
-            self.grads_pred[self.iterations] = [
+            self.grads_pred[self.partition_id] = [
                 [
                     g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
                     for g, e in zip(layer_g, layer_e)
                 ]
-                for layer_g, layer_e in zip(self.grads[self.iterations], self.errors[self.iterations])
+                for layer_g, layer_e in zip(self.grads[self.partition_id], self.errors[self.partition_id])
             ]
             (
                 self.flattened_grad_pred,
                 self.num_tensors_per_list,
                 self.tensor_sizes,
                 self.original_shapes,
-            ) = self.flatten_nested_tensor_list(self.grads_pred[self.iterations])
+            ) = self.flatten_nested_tensor_list(self.grads_pred[self.partition_id])
 
-            with torch.cuda.stream(self.stream):
-                self.comm_start_event.record(self.stream)
-                dist.broadcast(
-                    self.flattened_grad_pred, src=self.iterations, group=self.local_group
-                )
-                self.comm_end_event.record(self.stream)
-            # comm_handle = dist.broadcast(
-            #     self.flattened_grad_pred, src=self.iterations, async_op=True, group=self.inter_group
-            # )
-            # self.comm_works[self.iterations] = comm_handle
+            # with torch.cuda.stream(self.stream):
+            #     self.comm_start_event.record(self.stream)
+            #     dist.broadcast(
+            #         self.flattened_grad_pred, src=self.iterations, group=self.local_group
+            #     )
+            #     self.comm_end_event.record(self.stream)
+            comm_handle = dist.broadcast(
+                self.flattened_grad_pred, src=self.partition_id % dist.get_world_size(self.inter_group), async_op=True, group=self.inter_group
+            )
+            self.comm_works[self.partition_id] = comm_handle
 
         if self.iterations == len(self.partitions) - 1:
             self.errors[self.partition_id] = [
@@ -116,9 +118,9 @@ class PolarCommHook:
                 ]
                 for layer_g, layer_p in zip(self.grads[self.partition_id], self.grads_pred[self.partition_id])
             ]
-            # self.comm_works[self.partition_id].wait()
-            self.comm_end_event.wait(stream=torch.cuda.default_stream())
-            self.comm_end_event.synchronize()
+            self.comm_works[self.partition_id].wait()
+            # self.comm_end_event.wait(stream=torch.cuda.default_stream())
+            # self.comm_end_event.synchronize()
             self.grads_pred[self.partition_id] = self.unflatten_nested_tensor_list(
                 self.flattened_grad_pred,
                 self.num_tensors_per_list,
@@ -139,6 +141,8 @@ class PolarCommHook:
                     if p.grad is not None:
                         p_pred = p_pred.to(p.grad.dtype)
                         p.grad = p.grad - p_pred
+            
+            self.offset = (self.offset + 1) % len(self.partitions)
 
         self.iterations += 1
         self.iterations %= len(self.partitions)
@@ -146,7 +150,7 @@ class PolarCommHook:
     def flatten_nested_tensor_list(
         self,
         nested_list: List[List[torch.Tensor]],
-    ) -> tuple[torch.Tensor, List[int], List[int], List[List[torch.Size]]]:
+    ):
         # 压平内层 List[torch.Tensor] 并记录结构 flatten each sublist of tensor (List[torch.Tensor]) and record structure of them
         flattened_tensors = []
         tensor_sizes = []  # 存储每个 Tensor 的元素数量 store the number of elements in each tensor
@@ -213,6 +217,7 @@ class NativePolarGradientCollector:
         self.partitions = partitions[::-1]
         self.comm_hook_handle = [None for _ in range(len(self.partitions))]
         self.comm_works = [None for _ in range(len(self.partitions))]
+        print("Partitions structure:", [type(p) for p in self.partitions])
         self.grads_accumulation = [
             [
                 [None for p in layer.parameters()]
@@ -299,21 +304,29 @@ class PolarTrainer:
         device=None,
         tokenizer=None,
     ):
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        # 如果使用CUDA，还需设置CUDA随机种子
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
         self.args = args
         self.local_group = local_group
         self.inter_group = inter_group
+        self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.device = torch.device(
             f"cuda:{dist.get_rank(group=self.local_group)}"
         ) if torch.cuda.is_available() else torch.device("cpu")
+        self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{args.using_hook}-{args.local_steps}")
+        
         if args.pretrained:
             self.model = model or AutoModelForSequenceClassification.from_pretrained(
-                args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
+                args.model_path, torch_dtype=torch.float32, num_labels=args.num_labels
             )
             self.model.to(self.device)
             print(next(self.model.parameters()).device)
         else:
             config = AutoConfig.from_pretrained(
-                args.model_path, torch_dtype=torch.float16, num_labels=args.num_labels
+                args.model_path, torch_dtype=torch.float32, num_labels=args.num_labels
             )
             self.model = model or AutoModelForSequenceClassification.from_config(config)
             self.model.to(self.device)
@@ -370,20 +383,23 @@ class PolarTrainer:
             batch_size=args.batch_size,
             sampler=eval_sampler,
         )
-        self.optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6, weight_decay=0.01, eps=1e-8, betas=(0.9, 0.999))
         total_steps = len(self.train_dataloader) * args.epochs
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=0.1 * total_steps,
-            num_training_steps=total_steps,
-        )
-        self.grad_partitions_bucket = []
-        self.gradient_collector = NativePolarGradientCollector(
-            inter_group=self.inter_group if not args.single_node else self.local_group,
-            local_group=self.local_group,
-            partitions=self.model_partitions,
-        )
-        if args.using_hook:
+        # self.scheduler = get_linear_schedule_with_warmup(
+        #     self.optimizer,
+        #     num_warmup_steps=0.1 * total_steps,
+        #     num_training_steps=total_steps,
+        # )
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=50)
+        if self.args.using_hook:
+            self.grad_partitions_bucket = []
+            self.gradient_collector = NativePolarGradientCollector(
+                inter_group=self.inter_group if not self.args.single_node else self.local_group,
+                local_group=self.local_group,
+                partitions=self.model_partitions,
+            )
+        if self.args.using_hook:
             self.gradient_collector.register_hook()
 
     def get_bert_all_layers(self, module: torch.nn.Module):
@@ -424,16 +440,20 @@ class PolarTrainer:
             ):
                 partitions.append(partition)
             else:
-                partitions.append(partition.append(modules[i]))
+                partition.append(modules[i])
+                partitions.append(partition)
                 i += 1
 
         return partitions
 
     def train(self):
-        print("send_buffers")
-        LOCAL_STEPS = 1  # 每4个batch同步一次梯度
+        if not self.args.using_hook:
+            self._train()
+            return
         current_local_step = 0  # 当前本地步数计数器
         print(f"LOCAL_STEPS: {self.args.local_steps}")
+        correct_predictions = 0
+        total_predictions = 0
 
         with torch.profiler.profile(
             activities=[
@@ -443,7 +463,7 @@ class PolarTrainer:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.chrome_trace_handler("./log/trace.json"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.args.using_hook}-{self.args.local_steps}"),
             with_stack=True,
         ) as prof:
             for epoch in range(self.args.epochs):
@@ -454,33 +474,43 @@ class PolarTrainer:
                     batch = {k: v.to(self.device) for k, v in batch.items()}
                     outputs = self.model(**batch)
                     loss = outputs.loss
+                    logits = outputs.logits
                     loss.backward()
 
                     # 梯度裁剪
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                    part_rank = current_local_step % self.args.local_steps
-                    current_local_step += 1
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
 
                     self.optimizer.step()
-                    self.scheduler.step()
                     self.optimizer.zero_grad()
 
                     total_loss += loss.item()
+                    _, predicted = torch.max(logits, dim=1)
+                    correct_predictions += (predicted == batch["labels"]).sum().item()
+                    total_predictions += batch["labels"].size(0)
+                    current_accuracy = correct_predictions / total_predictions
+                    avg_train_loss = total_loss / (batch_idx + 1)
                     progress_bar.set_postfix({"loss": loss.item()})
+                    
+                    current_local_step += 1
 
                     # 记录当前 step 到 profiler
                     if current_local_step % self.args.local_steps == 0:
                         prof.step()
 
                 avg_train_loss = total_loss / len(self.train_dataloader)
+                self.writer.add_scalar('Loss/train', avg_train_loss, epoch)
+                self.writer.add_scalar('Learning Rate', self.scheduler.get_last_lr()[0], epoch)
+                self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
+                self.scheduler.step()
                 print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
-            
+    
     def _train(self):
         print("send_buffers")
         LOCAL_STEPS = 1  # 每4个batch同步一次梯度
         current_local_step = 0  # 当前本地步数计数器
         print(f"LOCAL_STEPS: {self.args.local_steps}")
+        correct_predictions = 0
+        total_predictions = 0
         # 训练循环
         for epoch in range(self.args.epochs):
             self.model.train()
@@ -490,22 +520,34 @@ class PolarTrainer:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 outputs = self.model(**batch)
                 loss = outputs.loss
+                logits = outputs.logits
                 loss.backward()
+                
+                # 在反向传播后执行
+                for param in self.model.parameters():
+                    # 使用ReduceOp.SUM进行求和操作
+                    dist.all_reduce(param, op=dist.ReduceOp.SUM)
+                    # 求平均梯度
+                    param.grad /= dist.get_world_size()
                 # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                part_rank = current_local_step % self.args.local_steps
-
-                current_local_step += 1
-
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                
                 self.optimizer.step()
-                self.scheduler.step()
                 self.optimizer.zero_grad()
-
+                
                 total_loss += loss.item()
+                _, predicted = torch.max(logits, dim=1)
+                correct_predictions += (predicted == batch["labels"]).sum().item()
+                total_predictions += batch["labels"].size(0)
+                current_accuracy = correct_predictions / total_predictions
+                avg_train_loss = total_loss / (batch_idx + 1)
                 progress_bar.set_postfix({"loss": loss.item()})
 
             avg_train_loss = total_loss / len(self.train_dataloader)
+            self.writer.add_scalar('Loss/train', avg_train_loss, epoch)
+            self.writer.add_scalar('Learning Rate', self.scheduler.get_last_lr()[0], epoch)
+            self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
+            self.scheduler.step()
             print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
 
 
@@ -607,7 +649,7 @@ if __name__ == "__main__":
         "--max_length", type=int, default=128, help="max length of the input sequence"
     )
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--local_steps", type=int, default=4, help="local steps")

@@ -58,12 +58,12 @@ parser.add_argument(
 parser.add_argument(
     "--max_length", type=int, default=128, help="max length of the input sequence"
 )
-parser.add_argument("--batch_size", type=int, default=16)
-parser.add_argument("--lr", type=float, default=1e-5)
-parser.add_argument("--epochs", type=int, default=10)
-parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument("--lr", type=float, default=1e-9)
+parser.add_argument("--epochs", type=int, default=1)
+parser.add_argument("--seed", type=int, default=54)
 parser.add_argument("--local_steps", type=int, default=2, help="local steps")
-parser.add_argument("--using_hook", type=bool, default=True)
+parser.add_argument("--using_hook", type=bool, default=False)
 parser.add_argument("--single_node", type=bool, default=True)
 
 args = parser.parse_args()
@@ -71,7 +71,7 @@ args = parser.parse_args()
 global_group, inter_group, local_group = process_group_setup()
 
 config = AutoConfig.from_pretrained(
-    "models/bert-base-uncased", torch_dtype=torch.float16, num_labels=2
+    "models/bert-base-uncased", torch_dtype=torch.float32, num_labels=2
 )
 model = AutoModelForSequenceClassification.from_config(config)
 
