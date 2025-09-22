@@ -25,7 +25,7 @@ from transformers.models.bert.modeling_bert import (
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
-from typing import List
+from typing import List, Tuple
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -81,7 +81,10 @@ class PolarCommHook:
         """_summary_
         doing broadcast, node [rank] will broadcast the [rank]th partition's gradients to all other nodes
          0   1   2   3 
-        {0}  1   2   3 iter_0
+        {0}  1   2   3  iter_0
+         0  {1}  2   3  iter_1
+         0   1  {2}  3  iter_2
+         0   1   2  {3} iter_3
         """
         if self.partition_id == (self.iterations + self.offset) % len(self.partitions):
             scale = len(self.partitions) / (self.partition_id + 1)
@@ -98,13 +101,7 @@ class PolarCommHook:
                 self.tensor_sizes,
                 self.original_shapes,
             ) = self.flatten_nested_tensor_list(self.grads_pred[self.partition_id])
-
-            # with torch.cuda.stream(self.stream):
-            #     self.comm_start_event.record(self.stream)
-            #     dist.broadcast(
-            #         self.flattened_grad_pred, src=self.iterations, group=self.local_group
-            #     )
-            #     self.comm_end_event.record(self.stream)
+            
             comm_handle = dist.broadcast(
                 self.flattened_grad_pred, src=self.partition_id % dist.get_world_size(self.inter_group), async_op=True, group=self.inter_group
             )
@@ -150,7 +147,16 @@ class PolarCommHook:
     def flatten_nested_tensor_list(
         self,
         nested_list: List[List[torch.Tensor]],
-    ):
+    ) -> Tuple[torch.Tensor, List[int], List[int], List[List[tuple]]]:
+        '''
+        Args:
+            nested_list (List[List[torch.Tensor]]): A nested list of tensors to be flattened
+        Returns:
+            final_flattened (torch.Tensor): A single 1D tensor containing all elements from the nested list
+            num_tensors_per_list (List[int]): Number of tensors in each sublist
+            tensor_sizes (List[int]): Number of elements in each tensor
+            original_shapes (List[List[tuple]]): Original shapes of each tensor in the nested list
+        '''
         # 压平内层 List[torch.Tensor] 并记录结构 flatten each sublist of tensor (List[torch.Tensor]) and record structure of them
         flattened_tensors = []
         tensor_sizes = []  # 存储每个 Tensor 的元素数量 store the number of elements in each tensor
@@ -177,6 +183,15 @@ class PolarCommHook:
         tensor_sizes: List[int],
         original_shapes: List[List[tuple]],  # 需额外传入原始形状
     ) -> List[List[torch.Tensor]]:
+        '''
+        Args:
+            flattened (torch.Tensor): A single 1D tensor containing all elements from the nested list
+            num_tensors_per_list (List[int]): Number of tensors in each sublist
+            tensor_sizes (List[int]): Number of elements in each tensor
+            original_shapes (List[List[tuple]]): Original shapes of each tensor in the nested list
+        Returns:
+            restored_tensors (List[List[torch.Tensor]]): The nested list of tensors restored to their original shapes    
+        '''
         # Step 1: 按 tensor_sizes 切分 1D Tensor
         split_tensors = torch.split(flattened, tensor_sizes)
 
@@ -304,6 +319,15 @@ class PolarTrainer:
         device=None,
         tokenizer=None,
     ):
+        '''
+        Args:
+            args (argparse.Namespace): Command line arguments containing training configurations.
+            inter_group (torch.distributed.ProcessGroup): Process group for inter-node communication.
+            local_group (torch.distributed.ProcessGroup): Process group for intra-node communication.
+            model (torch.nn.Module, optional): Predefined model. If None, a model will be created based on args. Defaults to None.
+            device (torch.device, optional): Device to run the model on. If None, it will be set based on availability of CUDA. Defaults to None.
+            tokenizer (transformers.PreTrainedTokenizer, optional): Predefined tokenizer. If None, a tokenizer will be created based on args. Defaults to None.
+        '''
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         # 如果使用CUDA，还需设置CUDA随机种子
