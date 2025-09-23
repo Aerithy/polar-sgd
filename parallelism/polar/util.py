@@ -1,13 +1,12 @@
 import torch
 from transformers import AutoTokenizer
 
-def split_model_by_split_spec(model, split_spec, device=None):
+def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     """
     使用 split_spec 自动划分模型为多个 stage，并返回每个 stage 的模块列表
     """
     from torch.distributed.pipelining import pipeline
     
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     example_batch = tokenizer("This is a dummy input for tracing.", return_tensors="pt")
     example_args = (example_batch['input_ids'].to(self.device),)
     example_kwargs = {'attention_mask': example_batch['attention_mask'].to(self.device)}
