@@ -1,6 +1,6 @@
 import torch
 
-def split_model_by_split_spec(model, split_spec, example_args, example_kwargs, device=None):
+def split_model_by_split_spec(model, split_spec, device=None):
     """
     使用 split_spec 自动划分模型为多个 stage，并返回每个 stage 的模块列表
     """
