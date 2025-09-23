@@ -117,6 +117,10 @@ def main():
     tokenized_datasets = tokenized_datasets.map(format_for_wrapper, batched=True)
     tokenized_datasets.set_format("torch")
     
+    train_sampler = DistributedSampler(tokenized_datasets["train"], num_replicas=world_size, rank=rank, shuffle=True)
+    eval_sampler = DistributedSampler(tokenized_datasets["validation"], num_replicas=world_size, rank=rank, shuffle=False)
+    train_dataloader = DataLoader(tokenized_datasets["train"], sampler=train_sampler, batch_size=args.batch_size)
+    eval_dataloader = DataLoader(tokenized_datasets["validation"], sampler=eval_sampler, batch_size=args.batch_size)
     # --- 4. 实例化并运行 PolarDataParallel ---
     # 注意：我们不再让 Wrapper 内部加载模型和数据，而是直接将创建好的对象传入
     if rank == 0:

@@ -152,6 +152,8 @@ class PolarDataParallel:
         split_spec: dict = None,
         device: torch.device = None,
         tokenizer: transformers.PreTrainedTokenizer = None,
+        train_dataloader: DataLoader = None,
+        eval_dataloader: DataLoader = None,
     ):
         '''
         Args:
@@ -193,22 +195,22 @@ class PolarDataParallel:
             self.model.to(self.device)
             print(next(self.model.parameters()).device)
 
-        self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
-        self.dataset = load_from_disk(args.data_path)
+        # self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
+        # self.dataset = load_from_disk(args.data_path)
 
-        def tokenize_function(examples):
-            return self.tokenizer(
-                examples["sentence"],
-                padding="max_length",
-                truncation=True,
-                max_length=args.max_length,
-            )
+        # def tokenize_function(examples):
+        #     return self.tokenizer(
+        #         examples["sentence"],
+        #         padding="max_length",
+        #         truncation=True,
+        #         max_length=args.max_length,
+        #     )
 
-        tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
-        tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
-        tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
-        tokenized_dataset.set_format("torch")
-        self.tokenized_dataset = tokenized_dataset
+        # tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
+        # tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
+        # tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
+        # tokenized_dataset.set_format("torch")
+        # self.tokenized_dataset = tokenized_dataset
 
         print(next(self.model.parameters()).device)
         # >>> old code for splitting model into partitions >>>
@@ -234,28 +236,34 @@ class PolarDataParallel:
         # <<< refactored code for splitting model into partitions <<<
 
         self.pipeline_model = self._create_pipeline_model(split_spec)
-        train_sampler = DistributedSampler(
-            tokenized_dataset["train"],
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
-            shuffle=True,
-        )
-        eval_sampler = DistributedSampler(
-            tokenized_dataset["validation"],
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
-            shuffle=False,
-        )
-        self.train_dataloader = DataLoader(
-            tokenized_dataset["train"],
-            batch_size=args.batch_size,
-            sampler=train_sampler,
-        )
-        self.eval_dataloader = DataLoader(
-            tokenized_dataset["validation"],
-            batch_size=args.batch_size,
-            sampler=eval_sampler,
-        )
+        
+        if train_dataloader is None or eval_dataloader is None:
+            raise ValueError("train_dataloader and eval_dataloader must be provided.")
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
+        
+        # train_sampler = DistributedSampler(
+        #     tokenized_dataset["train"],
+        #     num_replicas=dist.get_world_size(),
+        #     rank=dist.get_rank(),
+        #     shuffle=True,
+        # )
+        # eval_sampler = DistributedSampler(
+        #     tokenized_dataset["validation"],
+        #     num_replicas=dist.get_world_size(),
+        #     rank=dist.get_rank(),
+        #     shuffle=False,
+        # )
+        # self.train_dataloader = DataLoader(
+        #     tokenized_dataset["train"],
+        #     batch_size=args.batch_size,
+        #     sampler=train_sampler,
+        # )
+        # self.eval_dataloader = DataLoader(
+        #     tokenized_dataset["validation"],
+        #     batch_size=args.batch_size,
+        #     sampler=eval_sampler,
+        # )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6, weight_decay=0.01, eps=1e-8, betas=(0.9, 0.999))
         total_steps = len(self.train_dataloader) * args.epochs
         # self.scheduler = get_linear_schedule_with_warmup(
