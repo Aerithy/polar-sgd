@@ -1,16 +1,21 @@
 import torch
 
-def split_model_by_split_spec(model, split_spec, device=None):
+def split_model_by_split_spec(model, split_spec, example_args, example_kwargs, device=None):
     """
     使用 split_spec 自动划分模型为多个 stage，并返回每个 stage 的模块列表
     """
     from torch.distributed.pipelining import pipeline
-
+    
+    example_batch = self.tokenizer("This is a dummy input for tracing.", return_tensors="pt")
+    example_args = (example_batch['input_ids'].to(self.device),)
+    example_kwargs = {'attention_mask': example_batch['attention_mask'].to(self.device)}
+    
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
         model,
         split_spec=split_spec,
-        mb_args=None,
+        mb_args=example_args,
+        mb_kwargs=example_kwargs,
     )
 
     partitions = []
