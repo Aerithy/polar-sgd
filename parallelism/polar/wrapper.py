@@ -205,7 +205,7 @@ class PolarDataParallel:
         self.model_partition, self.pipe_model = split_model_by_export(
             model=self.model,
             split_spec=split_spec,
-            tokenizer=AutoTokenizer.from_pretrained(args.tokenizer_path),
+            tokenizer=tokenizer,
             device=self.device,
         )
         print("Model partitions created:", [len(p) for p in self.model_partitions])
