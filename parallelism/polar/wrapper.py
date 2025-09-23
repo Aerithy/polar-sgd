@@ -178,7 +178,7 @@ class PolarDataParallel:
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.device = torch.device(
             f"cuda:{dist.get_rank(group=self.local_group)}"
-        ) if torch.cuda.is_available() else raise ValueError("CUDA is not available.")
+        ) if torch.cuda.is_available() else torch.device("cpu")
         self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{args.using_hook}-{args.local_steps}")
         
         if args.pretrained:
