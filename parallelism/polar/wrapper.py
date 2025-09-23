@@ -199,15 +199,15 @@ class PolarDataParallel:
         
         if not split_spec:
             raise ValueError("split_spec must be provided to split the model.")
-        # self.model_partitions, self.pipe_model = split_model_by_split_spec(
-        #     model=self.model, split_spec=split_spec, tokenizer=AutoTokenizer.from_pretrained(args.tokenizer_path), device=self.device
-        # )
-        self.model_partition, self.pipe_model = split_model_by_export(
-            model=self.model,
-            split_spec=split_spec,
-            tokenizer=tokenizer,
-            device=self.device,
+        self.model_partitions, self.pipe_model = split_model_by_split_spec(
+            model=self.model, split_spec=split_spec, tokenizer=AutoTokenizer.from_pretrained(args.tokenizer_path), device=self.device
         )
+        # self.model_partition, self.pipe_model = split_model_by_export(
+        #     model=self.model,
+        #     split_spec=split_spec,
+        #     tokenizer=tokenizer,
+        #     device=self.device,
+        # )
         print("Model partitions created:", [len(p) for p in self.model_partitions])
         # <<< refactored code for splitting model into partitions <<<
 
