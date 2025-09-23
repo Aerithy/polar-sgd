@@ -10,11 +10,7 @@ def split_model_by_split_spec(model, split_spec, device=None):
     pipe = pipeline(
         model,
         split_spec=split_spec,
-        mb_args={
-            "num_microbatches": 1,
-            "optimize": False,
-            "device": device,
-        },   
+        mb_args=None,
     )
 
     partitions = []
