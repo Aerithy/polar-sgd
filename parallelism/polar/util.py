@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoTokenizer
 
+@torch._dynamo.disable
 def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     """
     使用 split_spec 自动划分模型为多个 stage，并返回每个 stage 的模块列表
@@ -14,13 +15,12 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     model.config.use_cache = False
     
     # 构建 pipeline 仅用于分析（num_chunks=1）
-    with torch._dynamo.disable():
-        pipe = pipeline(
-            model,
-            split_spec=split_spec,
-            mb_args=example_args,
-            mb_kwargs=example_kwargs,
-        )
+    pipe = pipeline(
+        model,
+        split_spec=split_spec,
+        mb_args=example_args,
+        mb_kwargs=example_kwargs,
+    )
 
     partitions = []
     for i, (name, submod) in enumerate(pipe.split_gm.named_children()):
