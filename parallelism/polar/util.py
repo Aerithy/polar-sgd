@@ -1,4 +1,5 @@
 import torch
+from transformers import AutoTokenizer
 
 def split_model_by_split_spec(model, split_spec, device=None):
     """
