@@ -4,6 +4,7 @@ import argparse
 import os
 import torch
 import torch.distributed as dist
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
