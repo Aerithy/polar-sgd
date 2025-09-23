@@ -371,7 +371,7 @@ class PolarDataParallel:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
 
-                if pp_rank == last_pp_rank
+                if pp_rank == last_pp_rank:
                     avg_train_loss = total_loss / len(self.train_dataloader)
                     self.writer.add_scalar('Loss/train', avg_train_loss, epoch)
                     self.writer.add_scalar('Learning Rate', self.scheduler.get_last_lr()[0], epoch)
