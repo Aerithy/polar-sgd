@@ -82,7 +82,8 @@ def main():
     # 关键：使用 AutoModelForCausalLM 而不是 AutoModelForSequenceClassification
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
-        torch_dtype=torch.bfloat16, # 使用 bfloat16 以节省内存
+        torch_dtype=torch.bfloat16, # 使用 bfloat16 以节省,
+        attn_implementation="eager",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
 
