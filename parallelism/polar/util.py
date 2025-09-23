@@ -11,6 +11,8 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     example_args = (example_batch['input_ids'].to(device),)
     example_kwargs = {'attention_mask': example_batch['attention_mask'].to(device)}
     
+    # model.config.use_cache = False
+    
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
         model,

@@ -71,11 +71,11 @@ def main():
     # 每个 stage 包含 32 / 4 = 8 层
     split_spec = {
         # 第 2 个 stage 从第 8 层开始
-        "model.layers.8": SplitPoint.BEGINNING,
+        # "model.layers.8": SplitPoint.BEGINNING,
         # 第 3 个 stage 从第 16 层开始
         "model.layers.16": SplitPoint.BEGINNING,
         # 第 4 个 stage 从第 24 层开始
-        "model.layers.24": SplitPoint.BEGINNING,
+        # "model.layers.24": SplitPoint.BEGINNING,
     }
     
     # --- 2. 加载模型和 Tokenizer ---
