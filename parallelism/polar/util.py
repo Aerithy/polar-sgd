@@ -6,7 +6,8 @@ def split_model_by_split_spec(model, split_spec, device=None):
     """
     from torch.distributed.pipelining import pipeline
     
-    example_batch = self.tokenizer("This is a dummy input for tracing.", return_tensors="pt")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    example_batch = tokenizer("This is a dummy input for tracing.", return_tensors="pt")
     example_args = (example_batch['input_ids'].to(self.device),)
     example_kwargs = {'attention_mask': example_batch['attention_mask'].to(self.device)}
     
