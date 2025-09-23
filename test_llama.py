@@ -39,7 +39,7 @@ def create_parser():
     parser.add_argument("--seed", type=int, default=42)
 
     # 并行化参数 (与 PolarDataParallel 保持一致)
-    parser.add_argument("--chunks", type=int, default=4, help="Number of micro-batches for pipeline parallelism")
+    parser.add_argument("--micro_batches", type=int, default=4, help="Number of micro-batches for pipeline parallelism")
     parser.add_argument("--using_hook", action="store_true", default=True, help="Whether to use the custom Polar hook")
     parser.add_argument("--local_steps", type=int, default=4, help="Number of partitions for the model (PP degree)")
     

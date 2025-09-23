@@ -9,9 +9,7 @@ def split_model_by_split_spec(model, split_spec, device=None):
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
         model,
-        num_chunks=1,
         split_spec=split_spec,
-        example_args=(torch.randint(0, 1000, (1, 8), device=device),) if device else None,
     )
 
     partitions = []

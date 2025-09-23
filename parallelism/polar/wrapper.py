@@ -9,7 +9,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributed.pipelining import SplitPoint, pipeline
+from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -178,7 +178,7 @@ class PolarDataParallel:
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.device = torch.device(
             f"cuda:{dist.get_rank(group=self.local_group)}"
-        ) if torch.cuda.is_available() else torch.device("cpu")
+        ) if torch.cuda.is_available() else raise ValueError("CUDA is not available.")
         self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{args.using_hook}-{args.local_steps}")
         
         if args.pretrained:
@@ -195,38 +195,8 @@ class PolarDataParallel:
             self.model.to(self.device)
             print(next(self.model.parameters()).device)
 
-        # self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(args.tokenizer_path)
-        # self.dataset = load_from_disk(args.data_path)
-
-        # def tokenize_function(examples):
-        #     return self.tokenizer(
-        #         examples["sentence"],
-        #         padding="max_length",
-        #         truncation=True,
-        #         max_length=args.max_length,
-        #     )
-
-        # tokenized_dataset = self.dataset.map(tokenize_function, batched=True)
-        # tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
-        # tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
-        # tokenized_dataset.set_format("torch")
-        # self.tokenized_dataset = tokenized_dataset
-
         print(next(self.model.parameters()).device)
-        # >>> old code for splitting model into partitions >>>
-        # self.model_partitions = None
-        # if args.model == "bert-base-uncased":
-        #     self.model_partitions = self.split_bert_based_model_into_partitions(
-        #         args.local_steps
-        #     )
-        # else:
-        #     raise NotImplementedError(
-        #         "Only BERT-based models are supported for partitioning at the moment."
-        #     )
-        # print(next(self.model_partitions[0][0].parameters()).device)
-        # <<< old code for splitting model into partitions <<<
         
-        # >>> refactored code for splitting model into partitions >>>
         if not split_spec:
             raise ValueError("split_spec must be provided to split the model.")
         self.model_partitions, self.pipe_model = split_model_by_split_spec(
@@ -236,41 +206,25 @@ class PolarDataParallel:
         # <<< refactored code for splitting model into partitions <<<
 
         self.pipeline_model = self._create_pipeline_model(split_spec)
+        stage = self.pipeline_model.build_stage(
+            stage_index=dist.get_rank(local_group),
+            device=self.device,
+            group=self.local_group,
+        )
+        
+        self.pipeline_schedule = ScheduleGPipe(
+            stage=stage,
+            n_microbatches=self.args.micro_batches,
+        )
         
         if train_dataloader is None or eval_dataloader is None:
             raise ValueError("train_dataloader and eval_dataloader must be provided.")
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
         
-        # train_sampler = DistributedSampler(
-        #     tokenized_dataset["train"],
-        #     num_replicas=dist.get_world_size(),
-        #     rank=dist.get_rank(),
-        #     shuffle=True,
-        # )
-        # eval_sampler = DistributedSampler(
-        #     tokenized_dataset["validation"],
-        #     num_replicas=dist.get_world_size(),
-        #     rank=dist.get_rank(),
-        #     shuffle=False,
-        # )
-        # self.train_dataloader = DataLoader(
-        #     tokenized_dataset["train"],
-        #     batch_size=args.batch_size,
-        #     sampler=train_sampler,
-        # )
-        # self.eval_dataloader = DataLoader(
-        #     tokenized_dataset["validation"],
-        #     batch_size=args.batch_size,
-        #     sampler=eval_sampler,
-        # )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-6, weight_decay=0.01, eps=1e-8, betas=(0.9, 0.999))
         total_steps = len(self.train_dataloader) * args.epochs
-        # self.scheduler = get_linear_schedule_with_warmup(
-        #     self.optimizer,
-        #     num_warmup_steps=0.1 * total_steps,
-        #     num_training_steps=total_steps,
-        # )
+        
         from torch.optim.lr_scheduler import CosineAnnealingLR
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=50)
         if self.args.using_hook:
@@ -279,7 +233,7 @@ class PolarDataParallel:
                 inter_group=self.inter_group if not self.args.single_node else self.local_group,
                 local_group=self.local_group,
                 partitions=self.model_partitions,
-                num_chunks=self.args.chunks,
+                num_chunks=self.args.micro_batches,
             )
         if self.args.using_hook:
             self.gradient_collector.register_hook()
@@ -360,6 +314,10 @@ class PolarDataParallel:
         if not self.args.using_hook:
             self._train()
             return
+        
+        pp_rank = dist.get_rank(group=self.local_group)
+        last_pp_rank = dist.get_world_size(self.local_group) - 1
+        
         current_local_step = 0  # 当前本地步数计数器
         print(f"LOCAL_STEPS: {self.args.local_steps}")
         correct_predictions = 0
@@ -382,35 +340,43 @@ class PolarDataParallel:
                 progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}")
                 for batch_idx, batch in enumerate(progress_bar):
                     batch = {k: v.to(self.device) for k, v in batch.items()}
-                    outputs = self.model(**batch)
-                    loss = outputs.loss
-                    logits = outputs.logits
-                    loss.backward()
+                    
+                    outputs = self.pipeline_schedule(
+                        batch['input_ids'],
+                        attention_mask=batch['attention_mask'],
+                        labels=batch['labels'],
+                    )
+                    
+                    if pp_rank == last_pp_rank:
+                        loss = outputs.loss
+                        logits = outputs.logits
+                        loss.backward()
+                        
+                        total_loss += loss.item()
+                        _, predicted = torch.max(logits, dim=1)
+                        correct_predictions += (predicted == batch["labels"]).sum().item()
+                        total_predictions += batch["labels"].size(0)
+                        current_accuracy = correct_predictions / total_predictions
+                        avg_train_loss = total_loss / (batch_idx + 1)
+                        progress_bar.set_postfix({"loss": loss.item()})
+                        
+                        current_local_step += 1     # Update local step counter
+
+                        # 记录当前 step 到 profiler
+                        if current_local_step % self.args.local_steps == 0:
+                            prof.step()
 
                     # 梯度裁剪
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-
                     self.optimizer.step()
                     self.optimizer.zero_grad()
 
-                    total_loss += loss.item()
-                    _, predicted = torch.max(logits, dim=1)
-                    correct_predictions += (predicted == batch["labels"]).sum().item()
-                    total_predictions += batch["labels"].size(0)
-                    current_accuracy = correct_predictions / total_predictions
-                    avg_train_loss = total_loss / (batch_idx + 1)
-                    progress_bar.set_postfix({"loss": loss.item()})
+                if pp_rank == last_pp_rank
+                    avg_train_loss = total_loss / len(self.train_dataloader)
+                    self.writer.add_scalar('Loss/train', avg_train_loss, epoch)
+                    self.writer.add_scalar('Learning Rate', self.scheduler.get_last_lr()[0], epoch)
+                    self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
+                    print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
                     
-                    current_local_step += 1
-
-                    # 记录当前 step 到 profiler
-                    if current_local_step % self.args.local_steps == 0:
-                        prof.step()
-
-                avg_train_loss = total_loss / len(self.train_dataloader)
-                self.writer.add_scalar('Loss/train', avg_train_loss, epoch)
-                self.writer.add_scalar('Learning Rate', self.scheduler.get_last_lr()[0], epoch)
-                self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
                 self.scheduler.step()
-                print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
     
