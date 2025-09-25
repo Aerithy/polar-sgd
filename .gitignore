@@ -1,5 +1,4 @@
 *.pyc
-*.md
 *.tar.gz
 *.safetensors
 *.pt.trace.json
