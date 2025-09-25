@@ -119,6 +119,7 @@ $$
 $$
 
 总体通信时延是：
+
 $$
 TimeCost = \tau_1 + \tau_2 \approx 2N\alpha + \frac{\lceil log_2^N \rceil + 2}{32}\beta V
 $$
