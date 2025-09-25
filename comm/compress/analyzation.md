@@ -11,6 +11,7 @@ Assumptions:
 
 首先，我们对通信开销建模：  
 经典的 $\alpha$, $\beta$ 模型如下，比较好理解，$\alpha$ 是通信延迟（一般取决于机器网络协议栈，比如最经典的优化方式如RDMA，DPDK等），$\beta$ 是传输带宽的反比，也就是实际在网络传输中的时间开销。
+
 $$
 \tau = \alpha + \beta V
 $$
@@ -27,7 +28,7 @@ $$
 \tau = \alpha + \beta V / N
 $$
 
-由于有$N$个节点，因此需要连续通信$N-1$步。从而得到：
+由于有 $N$ 个节点，因此需要连续通信 $N-1$ 步。从而得到：
 
 $$
 \tau_{ReduceScattor} = (N - 1)\alpha + (N-1)\beta V / N \approx N\alpha + \beta V
@@ -38,6 +39,7 @@ $$
 
 通信开销分析：  
 同上：
+
 $$
 \tau_{AllGather} = (N - 1)\alpha + (N-1)\beta V / N \approx N\alpha + \beta V
 $$
@@ -52,6 +54,7 @@ all-to-all会稍微复杂一点，
 
 从上面也可以看到，all-to-all的实现过程类似reduce-scatter和all-gather，但是需要一个块大小（$V/N$）的缓冲区。
 同理，其开销为：
+
 $$
 \tau_{All2All} = (N - 1)\alpha + (N-1)\beta V / N \approx N\alpha + \beta V
 $$
@@ -64,11 +67,13 @@ $$
 ### **在采用 1-bit 量化下：**
 
 先来看一下不压缩的 `all-reduce` 方式的耗时：
+
 $$
 \tau_{AllReduce} = 2(N - 1)\alpha + 2(N-1)\beta V / N \approx 2N\alpha + 2\beta V
 $$
 
 那么，如果我们采用 1-bit 量化，那么我们最理想的通信开销是：
+
 $$
 \tau_{1bitAllReduce(ideal)} = 2(N - 1)\alpha + 2\frac{N-1}{32N}\beta V \approx 2N\alpha + 2\frac{\beta V}{32}
 $$
@@ -94,10 +99,13 @@ $$
 ![1-bit-allreduce-alltoall](./1-bit-allreduce-all2all.png)
 
 * `all-to-all` 部分：
+  
 $$
 \tau_1 = (N - 1)\alpha + \frac{N - 1}{32N}\beta V \approx N\alpha + \frac{\beta V}{32}
 $$
+
 * `all-gather` 部分：
+  
 $$
 \tau_2 = \tau_1
 $$
