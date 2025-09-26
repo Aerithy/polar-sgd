@@ -70,14 +70,30 @@ def main():
     # Llama-2-7b 有 32 个 Transformer 层 (从 0 到 31)，名为 'model.layers.i'
     # 如果 local_steps=4, 我们将其分为 4 个 stage
     # 每个 stage 包含 32 / 4 = 8 层
-    split_spec = {
-        # 第 2 个 stage 从第 8 层开始
-        # "model.layers.8": SplitPoint.BEGINNING,
-        # 第 3 个 stage 从第 16 层开始
-        "model.layers.16": SplitPoint.BEGINNING,
-        # 第 4 个 stage 从第 24 层开始
-        # "model.layers.24": SplitPoint.BEGINNING,
-    }
+    # split_spec = {
+    #     # 第 2 个 stage 从第 8 层开始
+    #     # "model.layers.8": SplitPoint.BEGINNING,
+    #     # 第 3 个 stage 从第 16 层开始
+    #     "model.layers.16": SplitPoint.BEGINNING,
+    #     # 第 4 个 stage 从第 24 层开始
+    #     # "model.layers.24": SplitPoint.BEGINNING,
+    # }
+    def build_split_spec(num_layers: int, local_steps: int):
+        if local_steps <= 1:
+            return {}
+        
+        layers_per_stage = num_layers // local_steps
+        # 在每个 stage 的末尾之后创建切分点
+        split_indices = [layers_per_stage * (i + 1) for i in range(local_steps - 1)]
+        
+        return {f"model.layers.{i}": SplitPoint.BEGINNING for i in split_indices}
+
+    # 使用命令行参数 local_steps 动态生成 split_spec
+    # 假设模型有32层，后面会用真实配置更新
+    split_spec = build_split_spec(num_layers=32, local_steps=args.local_steps)
+    if rank == 0:
+        print(f"Dynamically generated split_spec for {args.local_steps} stages: {split_spec}")
+    
     
     # --- 2. 加载模型和 Tokenizer ---
     # 关键：使用 AutoModelForCausalLM 而不是 AutoModelForSequenceClassification
@@ -104,6 +120,8 @@ def main():
     )
     
     model = MyLlamaForCausalLM(llama_config).to(dtype=torch.bfloat16)
+    
+    split_spec = build_split_spec(num_layers=llama_config.num_hidden_layers, local_steps=args.local_steps)
     
     # 确保模型也知道新的 pad_token_id
     model.config.pad_token_id = tokenizer.pad_token_id

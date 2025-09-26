@@ -50,8 +50,10 @@ class RotaryEmbedding(nn.Module):
         x_ = x.view(B, H, T, D // 2, 2)
         x1 = x_[..., 0]
         x2 = x_[..., 1]
-        cos = cos[None, None, :, :]  # [1,1,T,D/2,1]
-        sin = sin[None, None, :, :]
+        # 修复：cos/sin 应该被扩展为 4D 张量 [1, 1, T, D/2] 以匹配 x1/x2 的广播。
+        # 错误日志表明这里可能被错误地实现为了5D张量。
+        cos = cos[None, None, :, :]  # Shape: [1, 1, T, D/2]
+        sin = sin[None, None, :, :]  # Shape: [1, 1, T, D/2]
         x1_rot = x1 * cos - x2 * sin
         x2_rot = x1 * sin + x2 * cos
         out = torch.stack([x1_rot, x2_rot], dim=-1).reshape(B, H, T, D)
