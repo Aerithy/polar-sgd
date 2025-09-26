@@ -20,9 +20,9 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
         model,
-        # split_spec=split_spec,
+        split_spec=split_spec,
         mb_args=example_args,
-        # mb_kwargs=example_kwargs,
+        mb_kwargs=example_kwargs,
     )
 
     partitions = []
