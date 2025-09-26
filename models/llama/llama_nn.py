@@ -132,7 +132,7 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp_norm = RMSNorm(config.hidden_size)
         self.mlp = LlamaMLP(config)
 
-    def forward(self, cos: torch.Tensor, sin: torch.Tensor, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # Pre-norm residual
         h = x + self.attn(self.attn_norm(x), attention_mask=attention_mask, cos=cos, sin=sin)
         h = h + self.mlp(self.mlp_norm(h))
