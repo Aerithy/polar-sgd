@@ -8,6 +8,9 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     """
     from torch.distributed.pipelining import pipeline
     
+    was_training = model.training
+    model.eval()  # 确保是推理模式
+    
     example_batch = tokenizer("This is a dummy input for tracing.", return_tensors="pt", padding=True).to(device)
     example_args = (example_batch['input_ids'].to(device),)
     example_kwargs = {
@@ -20,6 +23,8 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
         old_flag = getattr(model, "export_mode")
         setattr(model, "export_mode", True)
         need_restore = True
+    if was_training:
+        model.train()
     
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
