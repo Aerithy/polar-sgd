@@ -199,6 +199,13 @@ class PolarDataParallel:
         
         if not split_spec:
             raise ValueError("split_spec must be provided to split the model.")
+        
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "_attn_implementation_internal"
+        ):
+            logger.info("Forcing eager attention implementation for tracing.")
+            self.model.model._attn_implementation_internal = "eager"
+            
         self.model_partitions, self.pipe_model = split_model_by_split_spec(
             model=self.model, split_spec=split_spec, tokenizer=tokenizer, device=self.device
         )
