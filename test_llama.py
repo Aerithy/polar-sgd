@@ -9,7 +9,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.pipelining import SplitPoint
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
-from models.llama.llama_nn import LlamaConfig
+from models.llama.llama_nn import LlamaConfig, MyLlamaForCausalLM
 
 # 假设你的项目结构如下，可以正确导入 PolarDataParallel
 # ./
