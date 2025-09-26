@@ -9,6 +9,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.pipelining import SplitPoint
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
+from models.llama.llama_nn import LlamaConfig
 
 # 假设你的项目结构如下，可以正确导入 PolarDataParallel
 # ./
@@ -80,16 +81,30 @@ def main():
     
     # --- 2. 加载模型和 Tokenizer ---
     # 关键：使用 AutoModelForCausalLM 而不是 AutoModelForSequenceClassification
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.bfloat16, # 使用 bfloat16 以节省,
-        attn_implementation="eager",
-    )
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     args.model_path,
+    #     torch_dtype=torch.bfloat16, # 使用 bfloat16 以节省,
+    #     attn_implementation="eager",
+    # )
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
 
     # 关键：Llama2 tokenizer 没有默认的 pad token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+        
+    llama_config = LlamaConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=4096,
+        intermediate_size=11008,
+        num_hidden_layers=32,        # 7B 约 32 层
+        num_attention_heads=32,
+        rope_theta=10000.0,
+        pad_token_id=tokenizer.pad_token_id,
+        tie_word_embeddings=True,
+    )
+    
+    model = MyLlamaForCausalLM(llama_config).to(dtype=torch.bfloat16)
+    
     # 确保模型也知道新的 pad_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
