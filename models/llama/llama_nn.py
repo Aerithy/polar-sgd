@@ -75,7 +75,7 @@ class LlamaAttention(nn.Module):
 
         self.rotary = RotaryEmbedding(self.head_dim, config.rope_theta)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, cos: torch.Tensor = None, sin: torch.Tensor = None):
+    def forward(self, cos: torch.Tensor, sin: torch.Tensor, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # x: [B, T, C], attention_mask: [B, T] with 1 for valid, 0 for pad
         B, T, C = x.shape
         q = self.q_proj(x)  # [B, T, C]
@@ -132,7 +132,7 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp_norm = RMSNorm(config.hidden_size)
         self.mlp = LlamaMLP(config)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, cos: torch.Tensor = None, sin: torch.Tensor = None):
+    def forward(self, cos: torch.Tensor, sin: torch.Tensor, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # Pre-norm residual
         h = x + self.attn(self.attn_norm(x), attention_mask=attention_mask, cos=cos, sin=sin)
         h = h + self.mlp(self.mlp_norm(h))
