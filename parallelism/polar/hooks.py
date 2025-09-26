@@ -28,7 +28,7 @@ from tqdm import tqdm
 from utils.buffer import TensorBuffer
 from typing import List, Tuple
 
-from .util import split_model_by_split_spec
+from .util import get_partitions_and_pipe
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

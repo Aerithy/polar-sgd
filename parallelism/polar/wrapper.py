@@ -29,7 +29,7 @@ from tqdm import tqdm
 from utils.buffer import TensorBuffer
 from typing import List, Tuple
 
-from .util import split_model_by_split_spec, split_model_by_export
+from .util import get_partitions_and_pipe, split_model_by_export
 from .hooks import PolarCommHook
 
 logging.basicConfig(
@@ -149,7 +149,7 @@ class PolarDataParallel:
         inter_group: torch.distributed.ProcessGroup,
         local_group: torch.distributed.ProcessGroup,
         model: torch.nn.Module = None,
-        split_spec: dict = None,
+        # split_spec: dict = None,
         device: torch.device = None,
         tokenizer: transformers.PreTrainedTokenizer = None,
         train_dataloader: DataLoader = None,
@@ -197,17 +197,14 @@ class PolarDataParallel:
 
         print(next(self.model.parameters()).device)
         
-        if not split_spec:
-            raise ValueError("split_spec must be provided to split the model.")
-        
         if hasattr(self.model, "model") and hasattr(
             self.model.model, "_attn_implementation_internal"
         ):
             logger.info("Forcing eager attention implementation for tracing.")
             self.model.model._attn_implementation_internal = "eager"
             
-        self.model_partitions, self.pipe_model = split_model_by_split_spec(
-            model=self.model, split_spec=split_spec, tokenizer=tokenizer, device=self.device
+        self.model_partitions, self.pipe_model = get_partitions_and_pipe(
+            model=self.model, tokenizer=tokenizer, device=self.device
         )
         # self.model_partition, self.pipe_model = split_model_by_export(
         #     model=self.model,
@@ -283,7 +280,7 @@ class PolarDataParallel:
             layer_idx = i * layers_per_stage
             split_spec[f"{layer_prefix}{layer_idx}"] = SplitPoint.BEGINNING
             
-        self.model_partitions, _ = split_model_by_split_spec(
+        self.model_partitions, _ = get_partitions_and_pipe(
             self.model, split_spec, device=self.device
         )
         

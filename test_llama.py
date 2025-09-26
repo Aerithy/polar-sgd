@@ -90,9 +90,9 @@ def main():
 
     # 使用命令行参数 local_steps 动态生成 split_spec
     # 假设模型有32层，后面会用真实配置更新
-    split_spec = build_split_spec(num_layers=32, local_steps=args.local_steps)
-    if rank == 0:
-        print(f"Dynamically generated split_spec for {args.local_steps} stages: {split_spec}")
+    # split_spec = build_split_spec(num_layers=32, local_steps=args.local_steps)
+    # if rank == 0:
+    #     print(f"Dynamically generated split_spec for {args.local_steps} stages: {split_spec}")
     
     
     # --- 2. 加载模型和 Tokenizer ---
@@ -121,8 +121,19 @@ def main():
     
     model = MyLlamaForCausalLM(llama_config).to(dtype=torch.bfloat16)
     
-    split_spec = build_split_spec(num_layers=llama_config.num_hidden_layers, local_steps=args.local_steps)
+    def get_split_indices(num_layers: int, local_steps: int):
+        if local_steps <= 1:
+            return []
+        
+        layers_per_stage = num_layers // local_steps
+        return [layers_per_stage * (i + 1) - 1 for i in range(local_steps - 1)]
     
+    # split_spec = build_split_spec(num_layers=llama_config.num_hidden_layers, local_steps=args.local_steps)
+    split_indices = get_split_indices(llama_config.num_hidden_layers, args.local_steps)
+    model.model.set_split_points(split_indices)
+    if rank == 0:
+        print(f"Manually inserting split points after layers: {split_indices}")
+
     # 确保模型也知道新的 pad_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
@@ -201,7 +212,6 @@ def main():
         inter_group=inter_group,
         local_group=local_group,
         model=model,
-        split_spec=split_spec,
         tokenizer=tokenizer,
         tokenized_dataset=tokenized_datasets, # 传入已处理好的数据
         device=torch.device(f"cuda:{dist.get_rank(group=local_group)}")

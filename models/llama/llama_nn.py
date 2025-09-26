@@ -5,6 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.pipelining import pipe_split
 
 @dataclass
 class LlamaConfig:
@@ -148,8 +149,13 @@ class LlamaModel(nn.Module):
         
         head_dim = config.hidden_size // config.num_attention_heads
         self.rotary_emb = RotaryEmbedding(head_dim, config.rope_theta)
+        
+        self.split_points = set()
 
         self._init_weights()
+        
+    def set_split_points(self, split_indices: list):
+        self.split_points = set(split_indices)
 
     def _init_weights(self):
         # Simple init; for production, consider scaled init per LLaMA
@@ -165,8 +171,10 @@ class LlamaModel(nn.Module):
         
         seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x, cos, sin, attention_mask=attention_mask)
+            if i in self.split_points:
+                x = pipe_split(x)
         x = self.final_norm(x)
         return x  # [B, T, C]
 
