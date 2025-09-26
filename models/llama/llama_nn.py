@@ -74,7 +74,7 @@ class LlamaAttention(nn.Module):
 
         self.rotary = RotaryEmbedding(self.head_dim, config.rope_theta)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, cos: torch.Tensor = None, sin: torch.Tensor = None):
         # x: [B, T, C], attention_mask: [B, T] with 1 for valid, 0 for pad
         B, T, C = x.shape
         q = self.q_proj(x)  # [B, T, C]
@@ -85,7 +85,7 @@ class LlamaAttention(nn.Module):
         k = k.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        cos, sin = self.rotary._build_freqs(T, x.device, x.dtype)
+        # cos, sin = self.rotary._build_freqs(T, x.device, x.dtype)
         q = self.rotary.apply_rotary(q, cos, sin)
         k = self.rotary.apply_rotary(k, cos, sin)
 
@@ -131,9 +131,9 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp_norm = RMSNorm(config.hidden_size)
         self.mlp = LlamaMLP(config)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, cos: torch.Tensor = None, sin: torch.Tensor = None):
         # Pre-norm residual
-        h = x + self.attn(self.attn_norm(x), attention_mask=attention_mask)
+        h = x + self.attn(self.attn_norm(x), attention_mask=attention_mask, cos=cos, sin=sin)
         h = h + self.mlp(self.mlp_norm(h))
         return h
 
@@ -144,6 +144,9 @@ class LlamaModel(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.final_norm = RMSNorm(config.hidden_size)
+        
+        head_dim = config.hidden_size // config.num_attention_heads
+        self.rotary_emb = RotaryEmbedding(head_dim, config.rope_theta)
 
         self._init_weights()
 
@@ -158,8 +161,11 @@ class LlamaModel(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # input_ids: [B, T], attention_mask: [B, T]
         x = self.embed_tokens(input_ids)  # [B, T, C]
+        
+        seq_len = input_ids.shape[1]
+        cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
         for layer in self.layers:
-            x = layer(x, attention_mask=attention_mask)
+            x = layer(x, attention_mask=attention_mask, cos=cos, sin=sin)
         x = self.final_norm(x)
         return x  # [B, T, C]
 
