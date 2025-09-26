@@ -12,10 +12,9 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     example_args = (example_batch['input_ids'].to(device),)
     example_kwargs = {
         'attention_mask': example_batch['attention_mask'].to(device),
-        'use_cache': False,
+        # 'use_cache': False,
     }
     
-    model.config.use_cache = False
     
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
@@ -35,7 +34,7 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
                 leaf_modules.append(m)
         partitions.append(leaf_modules)
     
-    model.config.use_cache = False
+    # model.config.use_cache = False
 
     return partitions, pipe  # 返回分区 + pipeline 对象（可选）
 
