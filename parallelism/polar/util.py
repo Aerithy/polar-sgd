@@ -15,6 +15,11 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
         # 'use_cache': False,
     }
     
+    need_restore = False
+    if hasattr(model, "export_mode"):
+        old_flag = getattr(model, "export_mode")
+        setattr(model, "export_mode", True)
+        need_restore = True
     
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(

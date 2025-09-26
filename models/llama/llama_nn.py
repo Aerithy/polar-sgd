@@ -50,8 +50,8 @@ class RotaryEmbedding(nn.Module):
         x_ = x.view(B, H, T, D // 2, 2)
         x1 = x_[..., 0]
         x2 = x_[..., 1]
-        cos = cos[None, None, :, :, None]  # [1,1,T,D/2,1]
-        sin = sin[None, None, :, :, None]
+        cos = cos[None, None, :, :]  # [1,1,T,D/2,1]
+        sin = sin[None, None, :, :]
         x1_rot = x1 * cos - x2 * sin
         x2_rot = x1 * sin + x2 * cos
         out = torch.stack([x1_rot, x2_rot], dim=-1).reshape(B, H, T, D)
@@ -175,6 +175,7 @@ class MyLlamaForCausalLM(nn.Module):
         if config.tie_word_embeddings:
             # weight tying
             self.lm_head.weight = self.model.embed_tokens.weight
+        self.export_mode: bool = False
 
     def forward(
         self,
@@ -185,6 +186,13 @@ class MyLlamaForCausalLM(nn.Module):
         hidden_states = self.model(input_ids=input_ids, attention_mask=attention_mask)
         logits = self.lm_head(hidden_states)  # [B, T, V]
 
+        try:
+            import torch._dynamo as _dynamo
+            if getattr(self, "export_mode", False) or (_dynamo.is_compiling()):
+                return logits  # 仅返回 Tensor 以便 export
+        except Exception:
+            pass
+        
         loss = None
         if labels is not None:
             # Shift-one token LM loss
