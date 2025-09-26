@@ -23,8 +23,6 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
         old_flag = getattr(model, "export_mode")
         setattr(model, "export_mode", True)
         need_restore = True
-    if was_training:
-        model.train()
     
     # 构建 pipeline 仅用于分析（num_chunks=1）
     pipe = pipeline(
@@ -33,6 +31,11 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
         mb_args=example_args,
         mb_kwargs=example_kwargs,
     )
+    
+    if need_restore:
+        setattr(model, "export_mode", old_flag)
+    if was_training:
+        model.train()
 
     partitions = []
     for i, (name, submod) in enumerate(pipe.split_gm.named_children()):
