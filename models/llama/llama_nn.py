@@ -100,7 +100,7 @@ class LlamaAttention(nn.Module):
         if attention_mask is not None:
             # convert to [B, 1, 1, T] additive mask with -inf on pads
             mask = (1.0 - attention_mask.float()) * -1e10
-            attn_scores = attn_scores + mask[:, None, None, :]
+            attn_scores = attn_scores + mask[:, None, None, :].to(attn_scores.device)
 
         attn = torch.softmax(attn_scores, dim=-1)
         out = torch.matmul(attn, v)  # [B, H, T, D]
