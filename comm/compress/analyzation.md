@@ -1,4 +1,6 @@
 
+![alt text](image-1.png)
+
 Assumptions:
 
 * $N$ 为参与 `all-reduce` 的节点数量

@@ -10,7 +10,10 @@ def split_model_by_split_spec(model, split_spec, tokenizer, device=None):
     
     example_batch = tokenizer("This is a dummy input for tracing.", return_tensors="pt", padding=True).to(device)
     example_args = (example_batch['input_ids'].to(device),)
-    example_kwargs = {'attention_mask': example_batch['attention_mask'].to(device)}
+    example_kwargs = {
+        'attention_mask': example_batch['attention_mask'].to(device),
+        'use_cache': Fasle,
+    }
     
     model.config.use_cache = False
     
