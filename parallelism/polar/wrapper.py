@@ -352,7 +352,7 @@ class PolarDataParallel:
                 for batch_idx, batch in enumerate(progress_bar):
                     batch = {k: v.to(self.device) for k, v in batch.items()}
                     
-                    outputs = self.pipeline_schedule(
+                    outputs = self.pipeline_schedule.step(
                         batch['input_ids'],
                         attention_mask=batch['attention_mask'],
                         labels=batch['labels'],
