@@ -19,12 +19,14 @@ def get_partitions_and_pipe(model, tokenizer, device=None):
         max_length=512,
         truncation=True,
     ).to(device)
+    # obtain model parameter's data type
+    dtype = next(model.parameters()).dtype
+    
     example_args = (example_batch['input_ids'].to(device),)
     example_kwargs = {
-        'attention_mask': example_batch['attention_mask'].to(device),
+        'attention_mask': example_batch['attention_mask'].to(device, dtype),
         # 'use_cache': False,
     }
-    
     need_restore = False
     if hasattr(model, "export_mode"):
         old_flag = getattr(model, "export_mode")
@@ -60,37 +62,3 @@ def get_partitions_and_pipe(model, tokenizer, device=None):
     # model.config.use_cache = False
 
     return partitions, pipe  # 返回分区 + pipeline 对象（可选）
-
-from torch.export import export
-
-def split_model_by_export(model, split_spec, tokenizer, device=None):
-    model.config.use_cache = False
-    model.eval()  # 确保是推理模式
-
-    example_batch = tokenizer("Hello world", return_tensors="pt")
-    args = (example_batch['input_ids'].to(device),)
-    kwargs = {'attention_mask': example_batch['attention_mask'].to(device)}
-
-    # 导出为 ExportedProgram
-    exported = export(model, args=args, kwargs=kwargs)
-
-    # 获取 graph_module
-    gm = exported.module()
-
-    # 根据 split_spec 手动拆分（需要解析 split_spec 字典）
-    # 示例：按模块名拆分
-    partitions = []
-    current_partition = []
-    split_points = set(split_spec.keys())
-
-    for name, node in gm.named_children():
-        if name in split_points and split_spec[name] == SplitPoint.BEGINNING:
-            if current_partition:
-                partitions.append(current_partition)
-                current_partition = []
-        current_partition.append(node)
-
-    if current_partition:
-        partitions.append(current_partition)
-
-    return partitions, gm
