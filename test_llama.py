@@ -215,6 +215,8 @@ def main():
         model=model,
         tokenizer=tokenizer,
         tokenized_dataset=tokenized_datasets, # 传入已处理好的数据
+        train_dataloader=train_dataloader,
+        eval_dataloader=eval_dataloader,
         device=torch.device(f"cuda:{dist.get_rank(group=local_group)}")
     )
 
