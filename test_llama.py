@@ -186,7 +186,7 @@ def main():
     
     # Monkey-patch wrapper.py 内部的数据加载和处理逻辑，因为我们已经在外部完成了
     # 这是一个更健壮的方案，避免修改 wrapper.py 内部逻辑
-    def new_init(self, args, inter_group, local_group, model, split_spec, device, tokenizer, tokenized_dataset):
+    def new_init(self, args, inter_group, local_group, model, device, tokenizer, tokenized_dataset):
         # 直接调用原始__init__，但跳过模型、tokenizer和数据的加载
         original_init = PolarDataParallel.__original_init__
         
@@ -199,7 +199,7 @@ def main():
         self.dataset = MockDataset(tokenized_dataset)
         
         # 调用原始 __init__ 的剩余部分
-        original_init(self, args, inter_group, local_group, model=self.model, split_spec=split_spec, device=device, tokenizer=self.tokenizer)
+        original_init(self, args, inter_group, local_group, model=self.model, device=device, tokenizer=self.tokenizer)
 
     # 保存原始的 init 方法
     PolarDataParallel.__original_init__ = PolarDataParallel.__init__
