@@ -22,7 +22,7 @@ from parallelism.polar.wrapper import PolarDataParallel
 
 def setup_distributed():
     """初始化分布式环境"""
-    dist.init_process_group(backend="gloo")
+    dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 def create_parser():
