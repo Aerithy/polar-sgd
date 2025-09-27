@@ -181,6 +181,7 @@ class PolarDataParallel:
         ) if torch.cuda.is_available() else torch.device("cpu")
         self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{args.using_hook}-{args.local_steps}")
         
+        self.tokenizer = tokenizer
         if args.pretrained:
             self.model = model or AutoModelForSequenceClassification.from_pretrained(
                 args.model_path, torch_dtype=torch.float32, num_labels=args.num_labels
@@ -215,8 +216,8 @@ class PolarDataParallel:
         print("Model partitions created:", [len(p) for p in self.model_partitions])
         # <<< refactored code for splitting model into partitions <<<
 
-        self.pipeline_model = self._create_pipeline_model(split_spec)
-        stage = self.pipeline_model.build_stage(
+        # self.pipeline_model = self._create_pipeline_model(split_spec)
+        stage = self.pipe_model.build_stage(
             stage_index=dist.get_rank(local_group),
             device=self.device,
             group=self.local_group,
@@ -281,7 +282,7 @@ class PolarDataParallel:
             split_spec[f"{layer_prefix}{layer_idx}"] = SplitPoint.BEGINNING
             
         self.model_partitions, _ = get_partitions_and_pipe(
-            self.model, split_spec, device=self.device
+            self.model, tokenizer, device=self.device
         )
         
     def _create_pipeline_model(self, split_spec):
