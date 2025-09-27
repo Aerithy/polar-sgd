@@ -241,7 +241,7 @@ class PolarDataParallel:
         if self.args.using_hook:
             self.grad_partitions_bucket = []
             self.gradient_collector = NativePolarGradientCollector(
-                inter_group=self.inter_group if not self.args.single_node else self.local_group,
+                inter_group=self.inter_group,
                 local_group=self.local_group,
                 partitions=self.model_partitions,
                 num_chunks=self.args.micro_batches,
