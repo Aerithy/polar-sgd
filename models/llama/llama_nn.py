@@ -174,7 +174,8 @@ class LlamaModel(nn.Module):
         for i, layer in enumerate(self.layers):
             x = layer(x, cos, sin, attention_mask=attention_mask)
             if i in self.split_points:
-                x = pipe_split(x)
+                # x = pipe_split(x)
+                pipe_split()
         x = self.final_norm(x)
         return x  # [B, T, C]
 
