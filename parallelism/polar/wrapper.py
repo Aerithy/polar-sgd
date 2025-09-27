@@ -29,7 +29,7 @@ from tqdm import tqdm
 from utils.buffer import TensorBuffer
 from typing import List, Tuple
 
-from .util import get_partitions_and_pipe, split_model_by_export
+from .util import get_partitions_and_pipe
 from .hooks import PolarCommHook
 
 logging.basicConfig(

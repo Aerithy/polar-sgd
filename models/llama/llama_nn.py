@@ -105,6 +105,7 @@ class LlamaAttention(nn.Module):
             attn_scores = attn_scores + mask[:, None, None, :].to(attn_scores.device)
 
         attn = torch.softmax(attn_scores, dim=-1)
+        attn = attn.to(v.dtype)
         out = torch.matmul(attn, v)  # [B, H, T, D]
         out = out.transpose(1, 2).contiguous().view(B, T, C)  # [B, T, C]
         out = self.o_proj(out)
