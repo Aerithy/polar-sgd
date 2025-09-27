@@ -148,6 +148,7 @@ def main():
             padding="max_length",
             truncation=True,
             max_length=args.max_length,
+            return_tensors="pt",
         )
 
     # 过滤掉空行

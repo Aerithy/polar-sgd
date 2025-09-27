@@ -355,7 +355,7 @@ class PolarDataParallel:
                     outputs = self.pipeline_schedule.step(
                         batch['input_ids'],
                         attention_mask=batch['attention_mask'],
-                        labels=batch['labels'],
+                        # labels=batch['labels'],
                     )
                     
                     if pp_rank == last_pp_rank:
