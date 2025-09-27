@@ -128,7 +128,6 @@ def main():
         layers_per_stage = num_layers // local_steps
         return [layers_per_stage * (i + 1) - 1 for i in range(local_steps - 1)]
     
-    # split_spec = build_split_spec(num_layers=llama_config.num_hidden_layers, local_steps=args.local_steps)
     split_indices = get_split_indices(llama_config.num_hidden_layers, args.local_steps)
     model.model.set_split_points(split_indices)
     if rank == 0:

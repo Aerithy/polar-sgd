@@ -11,7 +11,14 @@ def get_partitions_and_pipe(model, tokenizer, device=None):
     was_training = model.training
     model.eval()  # 确保是推理模式
     
-    example_batch = tokenizer("This is a dummy input for tracing.", return_tensors="pt", padding=True).to(device)
+    dummy_text = ["This is a dummy input for tracing."] * 2
+    example_batch = tokenizer(
+        dummy_text, 
+        return_tensors="pt", 
+        padding="max_length",
+        max_length=512,
+        truncation=True,
+    ).to(device)
     example_args = (example_batch['input_ids'].to(device),)
     example_kwargs = {
         'attention_mask': example_batch['attention_mask'].to(device),
