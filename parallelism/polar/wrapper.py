@@ -217,11 +217,14 @@ class PolarDataParallel:
         # <<< refactored code for splitting model into partitions <<<
 
         # self.pipeline_model = self._create_pipeline_model(split_spec)
+        print(f"Rank {dist.get_rank()}: Building stage for index {dist.get_rank(local_group)}")
         stage = self.pipe_model.build_stage(
             stage_index=dist.get_rank(local_group),
             device=self.device,
             group=self.local_group,
         )
+        if stage is None:
+            raise ValueError(f"Stage {dist.get_rank(local_group)} is None - check split configuration")
         
         self.pipeline_schedule = ScheduleGPipe(
             stage=stage,

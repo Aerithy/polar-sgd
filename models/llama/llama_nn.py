@@ -178,10 +178,15 @@ class LlamaModel(nn.Module):
         
         seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
+        
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        print(f"Rank {rank}: Processing {len(self.layers)} layers, split points: {self.split_points}")
+    
         for i, layer in enumerate(self.layers):
             x = layer(x, cos, sin, attention_mask=attention_mask)
             if i in self.split_points:
                 # x = pipe_split(x)
+                print(f"Rank {rank}: Split point at layer {i}")
                 pipe_split()
         x = self.final_norm(x)
         return x  # [B, T, C]
