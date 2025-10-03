@@ -19,6 +19,7 @@ from models.llama.llama_nn import LlamaConfig, MyLlamaForCausalLM
 # │       └── ...
 # └── test_llama.py
 from parallelism.polar.wrapper import PolarDataParallel
+from comm.process_group_setup import process_group_setup
 
 def setup_distributed():
     """初始化分布式环境"""
@@ -54,7 +55,8 @@ def create_parser():
 
 def main():
     args = create_parser()
-    setup_distributed()
+    # setup_distributed()
+    global_group, inter_group, local_group = process_group_setup()
 
     # 获取分布式通信组
     world_size = dist.get_world_size()
@@ -63,8 +65,8 @@ def main():
     # 假设所有进程在同一个 DP 组内，内部进行 PP
     # 在更复杂的场景下，这里可以创建不同的 inter_group 和 local_group
     # 但对于单节点的 DP+PP 测试，使用默认组即可
-    inter_group = dist.new_group(ranks=list(range(world_size)))
-    local_group = dist.new_group(ranks=list(range(world_size)))
+    # inter_group = dist.new_group(ranks=list(range(world_size)))
+    # local_group = dist.new_group(ranks=list(range(world_size)))
 
     # --- 1. 为 Llama-7b 定义分割策略 (split_spec) ---
     # Llama-2-7b 有 32 个 Transformer 层 (从 0 到 31)，名为 'model.layers.i'
