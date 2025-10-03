@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.pipelining import pipe_split
+import torch.distributed as dist
 
 @dataclass
 class LlamaConfig:
