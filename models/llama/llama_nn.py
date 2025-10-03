@@ -78,6 +78,9 @@ class LlamaAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # x: [B, T, C], attention_mask: [B, T] with 1 for valid, 0 for pad
+        if attention_mask is not None and attention_mask.dtype != x.dtype:
+            attention_mask = attention_mask.to(dtype=x.dtype)
+        
         B, T, C = x.shape
         q = self.q_proj(x)  # [B, T, C]
         k = self.k_proj(x)
@@ -169,6 +172,9 @@ class LlamaModel(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # input_ids: [B, T], attention_mask: [B, T]
         x = self.embed_tokens(input_ids)  # [B, T, C]
+        
+        if attention_mask is not None and attention_mask.dtype != x.dtype:
+            attention_mask = attention_mask.to(dtype=x.dtype)
         
         seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
