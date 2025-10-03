@@ -121,7 +121,7 @@ def main():
         tie_word_embeddings=True,
     )
     
-    model = MyLlamaForCausalLM(llama_config).to(dtype=torch.bfloat16)
+    model = MyLlamaForCausalLM(llama_config)    # .to(dtype=torch.bfloat16)
     
     def get_split_indices(num_layers: int, local_steps: int):
         if local_steps <= 1:
