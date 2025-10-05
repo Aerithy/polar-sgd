@@ -176,38 +176,38 @@ def main():
     if rank == 0:
         print("Initializing PolarDataParallel...")
         
-    # 我们需要模拟一个假的 dataset 对象，因为它在 wrapper 内部被引用
-    # 这是对当前 wrapper 实现的一个小妥协
-    class MockDataset:
-        def __init__(self, tokenized_data):
-            self.train = tokenized_data['train']
-            self.validation = tokenized_data['validation']
-            self.test = tokenized_data['test']
-        def __getitem__(self, key):
-            return getattr(self, key)
+    # # 我们需要模拟一个假的 dataset 对象，因为它在 wrapper 内部被引用
+    # # 这是对当前 wrapper 实现的一个小妥协
+    # class MockDataset:
+    #     def __init__(self, tokenized_data):
+    #         self.train = tokenized_data['train']
+    #         self.validation = tokenized_data['validation']
+    #         self.test = tokenized_data['test']
+    #     def __getitem__(self, key):
+    #         return getattr(self, key)
     
-    # Monkey-patch wrapper.py 内部的数据加载和处理逻辑，因为我们已经在外部完成了
-    # 这是一个更健壮的方案，避免修改 wrapper.py 内部逻辑
-    def new_init(self, args, inter_group, local_group, model, device, tokenizer, tokenized_dataset, train_dataloader, eval_dataloader):
-        # 直接调用原始__init__，但跳过模型、tokenizer和数据的加载
-        original_init = PolarDataParallel.__original_init__
+    # # Monkey-patch wrapper.py 内部的数据加载和处理逻辑，因为我们已经在外部完成了
+    # # 这是一个更健壮的方案，避免修改 wrapper.py 内部逻辑
+    # def new_init(self, args, inter_group, local_group, model, device, tokenizer, tokenized_dataset, train_dataloader, eval_dataloader):
+    #     # 直接调用原始__init__，但跳过模型、tokenizer和数据的加载
+    #     original_init = PolarDataParallel.__original_init__
         
-        # 模拟wrapper内部加载过程
-        self.args = args
-        self.tokenizer = tokenizer
-        self.model = model.to(device)
-        self.device = device
-        self.tokenized_dataset = tokenized_dataset
-        self.dataset = MockDataset(tokenized_dataset)
+    #     # 模拟wrapper内部加载过程
+    #     self.args = args
+    #     self.tokenizer = tokenizer
+    #     self.model = model.to(device)
+    #     self.device = device
+    #     self.tokenized_dataset = tokenized_dataset
+    #     self.dataset = MockDataset(tokenized_dataset)
         
-        # 调用原始 __init__ 的剩余部分
-        original_init(self, args, inter_group, local_group, model=self.model, device=device, 
-                      tokenizer=self.tokenizer, train_dataloader=train_dataloader, eval_dataloader=eval_dataloader)
+    #     # 调用原始 __init__ 的剩余部分
+    #     original_init(self, args, inter_group, local_group, model=self.model, device=device, 
+    #                   tokenizer=self.tokenizer, train_dataloader=train_dataloader, eval_dataloader=eval_dataloader)
 
-    # 保存原始的 init 方法
-    PolarDataParallel.__original_init__ = PolarDataParallel.__init__
-    # 用我们的新 init 替换它
-    PolarDataParallel.__init__ = new_init
+    # # 保存原始的 init 方法
+    # PolarDataParallel.__original_init__ = PolarDataParallel.__init__
+    # # 用我们的新 init 替换它
+    # PolarDataParallel.__init__ = new_init
 
 
     polar_wrapper = PolarDataParallel(
