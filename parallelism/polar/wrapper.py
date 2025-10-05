@@ -128,11 +128,6 @@ class NativePolarGradientCollector:
                     stream=comm_stream,
                 )
             )
-        try:
-            first_layer_type = type(self.partitions[self.partition_id][0]).__name__
-            logger.info(f"[collector:hook] register at partition_id={self.partition_id}, num_chunks={self.num_chunks}, first_layer={first_layer_type}")
-        except Exception as e:
-            logger.warning(f"[collector:hook] register context unavailable (partition_id={self.partition_id}): {e}")
 
     def synchronize(self):
         if self.comm_work is not None:

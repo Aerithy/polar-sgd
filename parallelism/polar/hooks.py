@@ -75,6 +75,7 @@ class PolarCommHook:
 
     def __call__(self, module, grad_input, grad_output):
         self.micro_batch_counter += 1
+        logger.debug(f"[hook:call] pid={self.partition_id}, mb_counter={self.micro_batch_counter}/{self.num_chunks}, iter={self.iterations}")
         if self.micro_batch_counter < self.num_chunks:
             return
         self.micro_batch_counter = 0
