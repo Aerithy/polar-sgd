@@ -84,6 +84,20 @@ class NativePolarGradientCollector:
             ]
             for partition in self.partitions
         ]
+        
+        print("Partitions structure:", [type(p) for p in self.partitions])
+        # 注入：分区统计与示例层类型
+        try:
+            sizes = [len(p) for p in self.partitions]
+            head_types = [[type(m).__name__ for m in p[:3]] for p in self.partitions]
+            total_params = [sum(p_.numel() for m in p for p_ in m.parameters()) for p in self.partitions]
+            logger.info(f"[collector:init] partitions_sizes={sizes}, partitions_total_params={total_params}, head_layer_types={head_types}")
+            for idx, p in enumerate(self.partitions):
+                if len(p) == 0:
+                    logger.warning(f"[collector:init] EMPTY partition after reverse at idx={idx}. Check split points and stage assignment.")
+        except Exception as e:
+            logger.exception(f"[collector:init] partition introspection failed: {e}")
+        
 
     def register_hook(self):
         """Register hook to the first layer of the partition.
@@ -91,21 +105,6 @@ class NativePolarGradientCollector:
         hook is registered to the first layer of each partition.
         For example, if there are N partitions, and M layers in each partition,
         then the hook will be registered to the following layers:
-
-        ```
-        model = [
-            partition[N - 1] = {
-                layer[0 * M]        ==> register hook here, if rank = N - 1.
-                ...
-                layer[1 * M - 1]
-            }
-            partition[0] = {
-                layer[(N - 1) * M]  ==> register hook here, if rank = 0.
-                ...
-                layer[N * M - 1]
-            }
-        ]
-        ```
 
         Args:
             rank (int): Rank of the partition.
@@ -129,6 +128,11 @@ class NativePolarGradientCollector:
                     stream=comm_stream,
                 )
             )
+        try:
+            first_layer_type = type(self.partitions[self.partition_id][0]).__name__
+            logger.info(f"[collector:hook] register at partition_id={self.partition_id}, num_chunks={self.num_chunks}, first_layer={first_layer_type}")
+        except Exception as e:
+            logger.warning(f"[collector:hook] register context unavailable (partition_id={self.partition_id}): {e}")
 
     def synchronize(self):
         if self.comm_work is not None:
