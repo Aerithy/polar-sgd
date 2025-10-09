@@ -192,7 +192,10 @@ class LlamaModel(nn.Module):
                 # x = pipe_split(x)
                 # print(f"Rank {rank}: Split point at layer {i}")
                 # pipe_split()
-        x = self.final_norm(x)
+        
+        if self.final_norm is not None:
+            x = self.final_norm(x)
+            
         return x  # [B, T, C]
 
 @dataclass
