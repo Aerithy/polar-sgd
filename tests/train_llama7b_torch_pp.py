@@ -39,14 +39,60 @@ class TokenizedDataset(torch.utils.data.Dataset):
             "labels": torch.tensor(tokens[1:], dtype=torch.long),
         }
 
-def get_dataloader(seq_len=512, batch_size=1, rank=0, world_size=1):
-    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer", token=True)
+def get_dataloader(
+    dataset_name: str = "wikitext",
+    dataset_config: str = "wikitext-2-raw-v1",
+    tokenizer_name: str = "meta-llama/Llama-2-7b-hf",  # 或使用 "hf-internal-testing/llama-tokenizer" 如果无权限
+    seq_length: int = 1024,
+    batch_size: int = 1,
+    num_workers: int = 2,
+    split: str = "train",
+    use_auth_token: bool = False,
+):
+    # Load tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name,
+            use_fast=False,
+            trust_remote_code=False,
+            use_auth_token=use_auth_token
+        )
+    except OSError:
+        print("⚠️ Cannot load official LLaMA tokenizer. Using a compatible one.")
+        tokenizer = AutoTokenizer.from_pretrained(
+            "hf-internal-testing/llama-tokenizer",
+            use_fast=False
+        )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    raw_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", token=True)
-    dataset = TokenizedDataset(raw_dataset, tokenizer, seq_len)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, pin_memory=False)
+
+    # Load dataset
+    dataset = load_dataset(dataset_name, dataset_config, split=split)
+
+    # Tokenize
+    tokenized_dataset = TokenizedDataset(dataset, tokenizer, seq_length=seq_length)
+
+    # Distributed sampler
+    sampler = None
+    if dist.is_initialized():
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            tokenized_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True
+        )
+
+    dataloader = DataLoader(
+        tokenized_dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        shuffle=(sampler is None),
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+    return dataloader, tokenizer
 
 # -----------------------------
 # Manual Model Partitioning (Option 1)
