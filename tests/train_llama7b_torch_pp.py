@@ -3,6 +3,7 @@ import os
 import argparse
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 from torch.utils.data import DataLoader, DistributedSampler, Dataset
 from datasets import load_dataset
@@ -214,8 +215,17 @@ def main():
         use_auth_token=args.use_auth_token,
         split="train"
     )
+    
+    def loss_fn(output, target):
+        shift_logits = output[..., :-1, :].contiguous()
+        shift_labels = target[..., 1:].contiguous()
+        return F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=0,
+        )
 
-    schedule = ScheduleGPipe(stage, n_microbatches=4)
+    schedule = ScheduleGPipe(stage, n_microbatches=4, loss_fn=loss_fn)
 
     for batch in dataloader:
         input_ids = batch["input_ids"].to(device)

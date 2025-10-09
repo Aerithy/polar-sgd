@@ -201,6 +201,7 @@ def train():
 
             optimizer.zero_grad()
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            # loss = torch.
             loss = outputs #.loss
 
             loss.backward()

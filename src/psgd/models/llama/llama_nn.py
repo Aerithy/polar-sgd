@@ -224,18 +224,20 @@ class MyLlamaForCausalLM(nn.Module):
 
         if self.lm_head is not None:  # last stage
             logits = self.lm_head(hidden)
-            if labels is not None:
-                # 计算 loss 并返回标量（Tensor）
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                loss = F.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                    ignore_index=self.config.pad_token_id,
-                )
-                return loss  # ✅ 返回标量 Tensor
-            else:
-                return logits  # 推理时返回 logits
+            # if labels is not None:
+            #     # 计算 loss 并返回标量（Tensor）
+            #     shift_logits = logits[..., :-1, :].contiguous()
+            #     shift_labels = labels[..., 1:].contiguous()
+            #     loss = F.cross_entropy(
+            #         shift_logits.view(-1, shift_logits.size(-1)),
+            #         shift_labels.view(-1),
+            #         ignore_index=self.config.pad_token_id,
+            #     )
+            #     print("✅ 返回标量 Tensor")
+            #     return loss  # ✅ 返回标量 Tensor
+            # else:
+            #     return logits  # 推理时返回 logits
+            return logits
         else:
             return hidden  # ✅ 返回 [B, T, C] Tensor
         # hidden_states = self.model(input_ids=input_ids, attention_mask=attention_mask)
