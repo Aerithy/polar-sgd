@@ -172,7 +172,10 @@ class LlamaModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
         # input_ids: [B, T], attention_mask: [B, T]
-        x = self.embed_tokens(input_ids)  # [B, T, C]
+        if self.embed_tokens is not None:
+            x = self.embed_tokens(input_ids)  # [B, T, C]
+        else:
+            x = input_ids
         
         if attention_mask is not None and attention_mask.dtype != x.dtype:
             attention_mask = attention_mask.to(dtype=x.dtype)
@@ -180,15 +183,15 @@ class LlamaModel(nn.Module):
         seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
         
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        print(f"Rank {rank}: Processing {len(self.layers)} layers, split points: {self.split_points}")
+        # rank = dist.get_rank() if dist.is_initialized() else 0
+        # print(f"Rank {rank}: Processing {len(self.layers)} layers, split points: {self.split_points}")
     
         for i, layer in enumerate(self.layers):
             x = layer(x, cos, sin, attention_mask=attention_mask)
-            if i in self.split_points:
+            # if i in self.split_points:
                 # x = pipe_split(x)
-                print(f"Rank {rank}: Split point at layer {i}")
-                pipe_split()
+                # print(f"Rank {rank}: Split point at layer {i}")
+                # pipe_split()
         x = self.final_norm(x)
         return x  # [B, T, C]
 
@@ -213,25 +216,46 @@ class MyLlamaForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-    ) -> CausalLMOutput:
-        hidden_states = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        logits = self.lm_head(hidden_states)  # [B, T, V]
+    ) -> torch.Tensor:
+        hidden = self.model(input_ids, attention_mask)
 
-        try:
-            import torch._dynamo as _dynamo
-            if getattr(self, "export_mode", False) or (_dynamo.is_compiling()):
-                return logits  # 仅返回 Tensor 以便 export
-        except Exception:
-            pass
+        if self.lm_head is not None:  # last stage
+            logits = self.lm_head(hidden)
+            if labels is not None:
+                # 计算 loss 并返回标量（Tensor）
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=self.config.pad_token_id,
+                )
+                return loss  # ✅ 返回标量 Tensor
+            else:
+                return logits  # 推理时返回 logits
+        else:
+            return hidden  # ✅ 返回 [B, T, C] Tensor
+        # hidden_states = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        # if self.lm_head is not None:
+        #     logits = self.lm_head(hidden_states)  # [B, T, V]
+        # else:
+        #     return hidden_states
+
+        # try:
+        #     import torch._dynamo as _dynamo
+        #     if getattr(self, "export_mode", False) or (_dynamo.is_compiling()):
+        #         return logits  # 仅返回 Tensor 以便 export
+        # except Exception:
+        #     pass
         
-        loss = None
-        if labels is not None:
-            # Shift-one token LM loss
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=self.config.pad_token_id,
-            )
-        return CausalLMOutput(loss=loss, logits=logits)
+        # loss = None
+        # if labels is not None:
+        #     # Shift-one token LM loss
+        #     shift_logits = logits[..., :-1, :].contiguous()
+        #     shift_labels = labels[..., 1:].contiguous()
+        #     loss = F.cross_entropy(
+        #         shift_logits.view(-1, shift_logits.size(-1)),
+        #         shift_labels.view(-1),
+        #         ignore_index=self.config.pad_token_id,
+        #     )
+        # return CausalLMOutput(loss=loss, logits=logits)
