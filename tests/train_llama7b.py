@@ -209,7 +209,7 @@ def train():
             global_step += 1
 
             if rank == 0:
-                pbar.set_postfix({"loss": f"loss.item():.4f"})
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                 if global_step % 100 == 0:
                     print(f"Step {global_step}, Loss: {loss.item():.4f}")
 
