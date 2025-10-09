@@ -227,7 +227,8 @@ def main():
 
     schedule = ScheduleGPipe(stage, n_microbatches=4, loss_fn=loss_fn)
 
-    if rank == 0:
+    global_step = 0
+    if stage.is_last == 0:
         pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
     else:
         pbar = dataloader
