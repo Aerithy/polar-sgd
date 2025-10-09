@@ -227,7 +227,8 @@ def main():
         if stage.is_first:
             output = schedule.step(input_ids)
         elif stage.is_last:
-            losses = schedule.step(target=labels)  # target 传给 last stage 的 forward
+            losses = []
+            schedule.step(target=labels, losses=losses)  # target 传给 last stage 的 forward
             loss = torch.stack(losses).mean()
             loss.backward()
             optimizer.step()
