@@ -131,7 +131,7 @@ def train():
     args = parser.parse_args()
 
     # Setup DDP
-    single = dist.get_rank()
+    single = args.single
     if single == 0:
         local_rank = dist.get_rank()
         torch.cuda.set_device(local_rank)
