@@ -149,7 +149,7 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleDict({str(i): LlamaDecoderLayer(config) for i in range(config.num_hidden_layers)})
         self.final_norm = RMSNorm(config.hidden_size)
         
         head_dim = config.hidden_size // config.num_attention_heads
@@ -186,7 +186,7 @@ class LlamaModel(nn.Module):
         # rank = dist.get_rank() if dist.is_initialized() else 0
         # print(f"Rank {rank}: Processing {len(self.layers)} layers, split points: {self.split_points}")
     
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers.values():
             x = layer(x, cos, sin, attention_mask=attention_mask)
             # if i in self.split_points:
                 # x = pipe_split(x)
