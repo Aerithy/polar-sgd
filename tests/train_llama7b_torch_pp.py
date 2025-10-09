@@ -1,0 +1,166 @@
+# train_llama7b_manual_pp.py
+import os
+import argparse
+import torch
+import torch.distributed as dist
+from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+from torch.utils.data import DataLoader, DistributedSampler
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from tqdm import tqdm
+
+# -----------------------------
+# 替换为你自己的模型定义
+# -----------------------------
+from your_model_file import LlamaConfig, MyLlamaForCausalLM  # e.g., from model import ...
+
+# -----------------------------
+# Dataset
+# -----------------------------
+class TokenizedDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, tokenizer, seq_len=512):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        text = self.dataset[idx]["text"]
+        tokens = self.tokenizer(
+            text, truncation=True, max_length=self.seq_len + 1, padding=False
+        )["input_ids"]
+        if len(tokens) < 2:
+            tokens = [self.tokenizer.bos_token_id, self.tokenizer.eos_token_id]
+        tokens = (tokens + [self.tokenizer.pad_token_id] * (self.seq_len + 1))[:self.seq_len + 1]
+        return {
+            "input_ids": torch.tensor(tokens[:-1], dtype=torch.long),
+            "labels": torch.tensor(tokens[1:], dtype=torch.long),
+        }
+
+def get_dataloader(seq_len=512, batch_size=1, rank=0, world_size=1):
+    tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer", token=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    raw_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", token=True)
+    dataset = TokenizedDataset(raw_dataset, tokenizer, seq_len)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, pin_memory=False)
+
+# -----------------------------
+# Manual Model Partitioning (Option 1)
+# -----------------------------
+def partition_llama_model(config, stage_idx, num_stages):
+    """
+    Manually partition LLaMA model for pipeline parallelism.
+    - Initialize on 'meta' to avoid OOM
+    - Keep only layers assigned to this stage
+    - Remove unused components (embeddings, lm_head, etc.)
+    """
+    with torch.device("meta"):
+        model = MyLlamaForCausalLM(config)
+
+    num_layers = config.num_hidden_layers
+    assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
+    layers_per_stage = num_layers // num_stages
+
+    start_layer = stage_idx * layers_per_stage
+    end_layer = (stage_idx + 1) * layers_per_stage
+
+    # 转换 layers 为 ModuleDict（保留 FQN）
+    layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
+    model.model.layers = torch.nn.ModuleDict(layers_dict)
+
+    # 删除不属于当前 stage 的层
+    for i in list(model.model.layers.keys()):
+        if not (start_layer <= int(i) < end_layer):
+            del model.model.layers[i]
+
+    # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
+    if stage_idx == 0:
+        model.lm_head = None
+        model.model.final_norm = None
+    # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
+    elif stage_idx == num_stages - 1:
+        model.model.embed_tokens = None
+    # 中间 stage: 移除所有非 layer 组件
+    else:
+        model.model.embed_tokens = None
+        model.model.final_norm = None
+        model.lm_head = None
+
+    return model
+
+# -----------------------------
+# Main Training Loop
+# -----------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--n_microbatches", type=int, default=4)
+    parser.add_argument("--seq_length", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    args = parser.parse_args()
+
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    PP_SIZE = world_size  # 1 stage per GPU
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    config = LlamaConfig(
+        vocab_size=32000,
+        hidden_size=4096,
+        intermediate_size=11008,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        rope_theta=10000.0,
+        pad_token_id=0,
+        tie_word_embeddings=True,
+    )
+
+    # ✅ 手动分区
+    stage_model = partition_llama_model(config, rank, PP_SIZE)
+    stage_model.to_empty(device=device, recurse=True)
+    stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+
+    # ✅ 构建 PipelineStage
+    stage = PipelineStage(
+        stage_model,
+        stage_index=rank,
+        num_stages=PP_SIZE,
+        device=device,
+        group=dist.group.WORLD,
+    )
+
+    optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) if stage.is_last else None
+    dataloader = get_dataloader(...)
+
+    schedule = ScheduleGPipe(stage, n_microbatches=4)
+
+    for batch in dataloader:
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device) if stage.is_last else None
+
+        if optimizer:
+            optimizer.zero_grad()
+
+        if stage.is_first:
+            output = schedule.step(input_ids)
+        elif stage.is_last:
+            losses = schedule.step(target=labels)  # target 传给 last stage 的 forward
+            loss = torch.stack(losses).mean()
+            loss.backward()
+            optimizer.step()
+        else:
+            schedule.step()
+
+    dist.destroy_process_group
+
+if __name__ == "__main__":
+    main()

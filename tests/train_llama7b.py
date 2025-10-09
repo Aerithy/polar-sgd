@@ -118,7 +118,7 @@ def get_dataloader(
 
 def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--single", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--seq_length", type=int, default=1024)
@@ -131,8 +131,9 @@ def train():
     args = parser.parse_args()
 
     # Setup DDP
-    local_rank = args.local_rank
-    if local_rank != -1:
+    single = dist.get_rank()
+    if single == 0:
+        local_rank = dist.get_rank()
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend="nccl")
         world_size = dist.get_world_size()
@@ -141,7 +142,7 @@ def train():
         rank = 0
         world_size = 1
 
-    device = torch.device(f"cuda:{local_rank}" if local_rank != -1 else "cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{local_rank}" if single == 0 else "cuda" if torch.cuda.is_available() else "cpu")
 
     # Config
     config = LlamaConfig(
@@ -200,7 +201,7 @@ def train():
 
             optimizer.zero_grad()
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
+            loss = outputs #.loss
 
             loss.backward()
             optimizer.step()
