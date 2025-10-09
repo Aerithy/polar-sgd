@@ -131,8 +131,8 @@ def partition_llama_model(config, stage_idx, num_stages):
     end_layer = (stage_idx + 1) * layers_per_stage
 
     # 转换 layers 为 ModuleDict（保留 FQN）
-    layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
-    model.model.layers = torch.nn.ModuleDict(layers_dict)
+    # layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
+    # model.model.layers = torch.nn.ModuleDict(layers_dict)
 
     # 删除不属于当前 stage 的层
     for i in list(model.model.layers.keys()):
