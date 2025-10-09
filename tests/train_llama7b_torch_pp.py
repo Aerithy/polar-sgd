@@ -12,7 +12,7 @@ from tqdm import tqdm
 # -----------------------------
 # 替换为你自己的模型定义
 # -----------------------------
-from your_model_file import LlamaConfig, MyLlamaForCausalLM  # e.g., from model import ...
+from psgd.models.llama.llama_nn import LlamaConfig, MyLlamaForCausalLM  # e.g., from model import ...
 
 # -----------------------------
 # Dataset
