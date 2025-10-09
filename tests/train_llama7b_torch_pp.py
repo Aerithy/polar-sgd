@@ -4,7 +4,7 @@ import argparse
 import torch
 import torch.distributed as dist
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Dataset
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from tqdm import tqdm
