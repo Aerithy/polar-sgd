@@ -99,9 +99,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--n_microbatches", type=int, default=4)
-    parser.add_argument("--seq_length", type=int, default=512)
+    parser.add_argument("--seq_length", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--dataset", type=str, default="wikitext")
+    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1")
+    parser.add_argument("--tokenizer", type=str, default="hf-internal-testing/llama-tokenizer")
+    parser.add_argument("--use_auth_token", action="store_true")
+    parser.add_argument("--output_dir", type=str, default="./llama7b_checkpoints")
     args = parser.parse_args()
 
     dist.init_process_group(backend="nccl")
@@ -139,7 +143,15 @@ def main():
     )
 
     optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) if stage.is_last else None
-    dataloader = get_dataloader(...)
+    dataloader, tokenizer = get_dataloader(
+        dataset_name=args.dataset,
+        dataset_config=args.dataset_config,
+        tokenizer_name=args.tokenizer,
+        seq_length=args.seq_length,
+        batch_size=args.batch_size,
+        use_auth_token=args.use_auth_token,
+        split="train"
+    )
 
     schedule = ScheduleGPipe(stage, n_microbatches=4)
 
