@@ -240,7 +240,7 @@ def main():
             losses = []
             schedule.step(target=labels, losses=losses)  # target 传给 last stage 的 forward
             loss = torch.stack(losses).mean()
-            loss.backward()
+            # loss.backward()
             optimizer.step()
         else:
             schedule.step()
