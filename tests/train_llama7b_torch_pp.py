@@ -227,23 +227,35 @@ def main():
 
     schedule = ScheduleGPipe(stage, n_microbatches=4, loss_fn=loss_fn)
 
-    for batch in dataloader:
+    if rank == 0:
+        pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
+    else:
+        pbar = dataloader
+    for batch in pbar:
         input_ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device) if stage.is_last else None
+        attention_mask = batch["attention_mask"].to(device)
 
         if optimizer:
             optimizer.zero_grad()
 
         if stage.is_first:
-            output = schedule.step(input_ids)
+            output = schedule.step(input_ids, attention_mask=attention_mask)
         elif stage.is_last:
             losses = []
-            schedule.step(target=labels, losses=losses)  # target 传给 last stage 的 forward
+            schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
             loss = torch.stack(losses).mean()
             # loss.backward()
             optimizer.step()
         else:
-            schedule.step()
+            schedule.step(attention_mask=attention_mask)
+            
+        global_step += 1
+
+        if stage.is_last == 0:
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            if global_step % 100 == 0:
+                print(f"Step {global_step}, Loss: {loss.item():.4f}")
 
     dist.destroy_process_group
 
