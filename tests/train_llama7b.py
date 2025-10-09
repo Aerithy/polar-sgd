@@ -160,7 +160,7 @@ def train():
     model = MyLlamaForCausalLM(config)
     model.to(device)
 
-    if local_rank != -1:
+    if single == 0:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
     # Optimizer
