@@ -58,7 +58,7 @@ class NativePolarGradientCollector:
         """
         self.inter_group = inter_group
         self.local_group = local_group
-        self.partitions = partitions[::-1]
+        self.partitions = partitions
         self.num_chunks = num_chunks
         self.comm_hook_handle = [None for _ in range(len(self.partitions))]
         self.comm_works = [None for _ in range(len(self.partitions))]
