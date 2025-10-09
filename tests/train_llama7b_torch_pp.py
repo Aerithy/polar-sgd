@@ -248,15 +248,14 @@ def main():
             loss = torch.stack(losses).mean()
             # loss.backward()
             optimizer.step()
+            
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            if global_step % 100 == 0:
+                print(f"Step {global_step}, Loss: {loss.item():.4f}")
         else:
             schedule.step(attention_mask=attention_mask)
             
         global_step += 1
-
-        if stage.is_last == 0:
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-            if global_step % 100 == 0:
-                print(f"Step {global_step}, Loss: {loss.item():.4f}")
 
     dist.destroy_process_group
 
