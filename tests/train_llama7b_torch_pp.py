@@ -17,11 +17,11 @@ from psgd.models.llama.llama_nn import LlamaConfig, MyLlamaForCausalLM  # e.g., 
 # -----------------------------
 # Dataset
 # -----------------------------
-class TokenizedDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, tokenizer, seq_len=512):
+class TokenizedDataset(Dataset):
+    def __init__(self, dataset, tokenizer, seq_length=2048):
         self.dataset = dataset
         self.tokenizer = tokenizer
-        self.seq_len = seq_len
+        self.seq_length = seq_length
 
     def __len__(self):
         return len(self.dataset)
@@ -29,14 +29,30 @@ class TokenizedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.dataset[idx]["text"]
         tokens = self.tokenizer(
-            text, truncation=True, max_length=self.seq_len + 1, padding=False
+            text,
+            truncation=True,
+            max_length=self.seq_length + 1,  # +1 for shifting
+            padding=False,
+            return_tensors=None
         )["input_ids"]
+
+        # Ensure we have at least 2 tokens
         if len(tokens) < 2:
             tokens = [self.tokenizer.bos_token_id, self.tokenizer.eos_token_id]
-        tokens = (tokens + [self.tokenizer.pad_token_id] * (self.seq_len + 1))[:self.seq_len + 1]
+
+        # Pad or truncate to seq_length + 1
+        if len(tokens) > self.seq_length + 1:
+            tokens = tokens[:self.seq_length + 1]
+        else:
+            tokens = tokens + [self.tokenizer.pad_token_id] * (self.seq_length + 1 - len(tokens))
+
+        input_ids = torch.tensor(tokens[:-1], dtype=torch.long)
+        labels = torch.tensor(tokens[1:], dtype=torch.long)
+        attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
         return {
-            "input_ids": torch.tensor(tokens[:-1], dtype=torch.long),
-            "labels": torch.tensor(tokens[1:], dtype=torch.long),
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask
         }
 
 def get_dataloader(
