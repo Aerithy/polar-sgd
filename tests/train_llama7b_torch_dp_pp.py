@@ -251,13 +251,9 @@ def main():
 
     schedule = ScheduleGPipe(stage, n_microbatches=4, loss_fn=loss_fn)
 
-    dp_group = dp_mesh.get_group()
-    def allreduce_gradients():
-        if not stage.is_last:
-            return
-        for param in stage.submod.parameters():
-            if param.grad is not None:
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=dp_group)
+    def hook(grad):
+        dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_mesh.get_group())
+        return grad
                 
     global_step = 0
     if stage.is_last:
@@ -278,7 +274,6 @@ def main():
             losses = []
             schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
             loss = torch.stack(losses).mean()
-            allreduce_gradients()
             optimizer.step()
             
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
