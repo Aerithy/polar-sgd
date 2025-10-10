@@ -257,7 +257,8 @@ def main():
     
     for param in stage.submod.parameters():
         if param.requires_grad:
-            param.register_hook(hook)
+            # param.register_hook(hook)
+            param.register_hook(lambda grad, r=dist.get_rank(): print(f"Rank {r}: grad shape {grad.shape}") or grad)
     global_step = 0
     if stage.is_last:
         pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
