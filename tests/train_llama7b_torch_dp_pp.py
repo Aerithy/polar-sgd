@@ -255,10 +255,21 @@ def main():
         dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_mesh.get_group())
         return grad
     
+    # ... after creating stage ...
+
+    dp_group = dp_mesh.get_group()
+
+    # Register gradient hooks for DP sync
     for param in stage.submod.parameters():
         if param.requires_grad:
-            # param.register_hook(hook)
-            param.register_hook(lambda grad, r=dist.get_rank(): print(f"Rank {r}: grad shape {grad.shape}") or grad)
+            param.register_hook(
+                lambda grad, group=dp_group: (
+                    dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
+                    grad
+                )[-1]
+            )
+
+    # ... training loop (no manual all_reduce) ...
     global_step = 0
     if stage.is_last:
         pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
