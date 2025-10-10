@@ -254,7 +254,10 @@ def main():
     def hook(grad):
         dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_mesh.get_group())
         return grad
-                
+    
+    for param in stage.submod.parameters():
+        if param.requires_grad:
+            param.register_hook(hook)
     global_step = 0
     if stage.is_last:
         pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
