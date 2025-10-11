@@ -216,7 +216,7 @@ def main():
         group=pp_mesh.get_group(),
     )
 
-    optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) if stage.is_last else None
+    optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) # if stage.is_last else None
     
     dp_rank = dp_mesh.get_local_rank()
     dataloader, tokenizer = get_dataloader(
