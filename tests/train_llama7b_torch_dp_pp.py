@@ -1,4 +1,5 @@
 # train_llama7b_manual_pp.py
+from gettext import dpgettext
 import os
 import argparse
 import torch
@@ -256,7 +257,8 @@ def main():
         return grad
     
     # ... after creating stage ...
-
+    
+    dp_rank = dp_mesh.get_local_rank()
     dp_group = dp_mesh.get_group()
 
     # Register gradient hooks for DP sync
@@ -264,6 +266,7 @@ def main():
         if param.requires_grad:
             param.register_hook(
                 lambda grad, group=dp_group: (
+                    print(f"rank: {dp_rank}/{rank} running all reduce on group: {dp_group.world_size}")
                     dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
                     grad
                 )[-1]
