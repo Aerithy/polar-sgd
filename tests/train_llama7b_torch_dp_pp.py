@@ -307,10 +307,17 @@ def main():
         else:
             schedule.step(attention_mask=attention_mask)
             
+        # 在 optimizer.step() 之前
+        grads = []
         for param in stage.submod.parameters():
-            if param.requires_grad and param.grad is not None:
-                print(f"rank: {rank} running all reduce on group: {dp_rank}")
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=dp_group)
+            if param.requires_grad:
+                if param.grad is None:
+                    param.grad = torch.zeros_like(param)
+                grads.append(param.grad)
+
+        if grads:
+            # 融合 all_reduce
+            dist._all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=dp_group)
                 
         optimizer.step()
         global_step += 1
