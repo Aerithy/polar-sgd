@@ -269,15 +269,15 @@ def main():
     print(f"rank: {rank}, pp_group rank: {pp_group.rank()}, pp_group size: {pp_group.size()}, pp_group local rank: {pp_rank}")
 
     # Register gradient hooks for DP sync
-    # for param in stage.submod.parameters():
-    #     if param.requires_grad:
-    #         param.register_hook(
-    #             lambda grad, group=dp_group: (
-    #                 print(f"rank: {dp_rank}/{rank} running all reduce on group: {group.world_size}"),
-    #                 dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
-    #                 grad
-    #             )[-1]
-    #         )
+    for param in stage.submod.parameters():
+        if param.requires_grad:
+            param.register_hook(
+                lambda grad, group=dp_group: (
+                    # print(f"rank: {dp_rank}/{rank} running all reduce on group: {group.world_size}"),
+                    dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
+                    grad
+                )[-1]
+            )
 
     # ... training loop (no manual all_reduce) ...
     global_step = 0
@@ -308,17 +308,17 @@ def main():
             schedule.step(attention_mask=attention_mask)
             
         # 在 optimizer.step() 之前
-        grads = []
-        for param in stage.submod.parameters():
-            if param.requires_grad:
-                if param.grad is None:
-                    param.grad = torch.zeros_like(param)
-                grads.append(param.grad)
+        # grads = []
+        # for param in stage.submod.parameters():
+        #     if param.requires_grad:
+        #         if param.grad is None:
+        #             param.grad = torch.zeros_like(param)
+        #         grads.append(param.grad)
 
-        if grads:
-            # 融合 all_reduce
-            # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
-            dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=dp_group)
+        # if grads:
+        #     # 融合 all_reduce
+        #     # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
+        #     dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=dp_group)
                 
         optimizer.step()
         global_step += 1
