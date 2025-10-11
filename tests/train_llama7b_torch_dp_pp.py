@@ -202,8 +202,8 @@ def main():
     )
 
     # ✅ 手动分区
-    # stage_idx = pp_mesh.get_local_rank()
-    stage_idx = pp_mesh.get_rank()
+    stage_idx = pp_mesh.get_local_rank()
+    # stage_idx = pp_mesh.get_rank()
     stage_model = partition_llama_model(config, stage_idx, PP_SIZE)
     stage_model.to_empty(device=device, recurse=True)
     stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
@@ -234,7 +234,7 @@ def main():
         dataloader.dataset,
         num_replicas=dp_size,
         rank=dp_rank,
-        shuffle=True
+        shuffle=True,
     )
     dataloader = DataLoader(
         dataloader.dataset,
@@ -307,7 +307,7 @@ def main():
             schedule.step(attention_mask=attention_mask)
             
         for param in stage.submod.parameters():
-            if param.requires_grad:
+            if param.requires_grad and param.grad is not None:
                 print(f"rank: {rank} running all reduce on group: {dp_rank}")
                 dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=dp_group)
                 
