@@ -289,7 +289,6 @@ def main():
             losses = []
             schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
             loss = torch.stack(losses).mean()
-            optimizer.step()
             
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
             if global_step % 100 == 0:
@@ -297,6 +296,7 @@ def main():
         else:
             schedule.step(attention_mask=attention_mask)
             
+        optimizer.step()
         global_step += 1
 
     dist.destroy_process_group
