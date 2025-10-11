@@ -266,7 +266,7 @@ def main():
         if param.requires_grad:
             param.register_hook(
                 lambda grad, group=dp_group: (
-                    print(f"rank: {dp_rank}/{rank} running all reduce on group: {dp_group.world_size}")
+                    print(f"rank: {dp_rank}/{rank} running all reduce on group: {dp_group.world_size}"),
                     dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
                     grad
                 )[-1]
