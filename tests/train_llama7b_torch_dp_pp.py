@@ -220,6 +220,7 @@ def main():
     optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) # if stage.is_last else None
     
     dp_rank = dp_mesh.get_local_rank()
+    # dp_rank = dp_mesh.get_rank()
     dataloader, tokenizer = get_dataloader(
         dataset_name=args.dataset,
         dataset_config=args.dataset_config,
@@ -307,6 +308,7 @@ def main():
             
         for param in stage.submod.parameters():
             if param.requires_grad:
+                print(f"rank: {rank} running all reduce on group: {dp_rank}")
                 dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=dp_group)
                 
         optimizer.step()
