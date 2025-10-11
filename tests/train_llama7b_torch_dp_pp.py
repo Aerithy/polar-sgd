@@ -260,8 +260,11 @@ def main():
     
     dp_rank = dp_mesh.get_local_rank()
     dp_group = dp_mesh.get_group()
+    pp_rank = pp_mesh.get_local_rank()
+    pp_group = pp_mesh.get_group()
     dist.get_world_size(dp_group)
-    print(f"rank: {rank}, dp_group rank: {dp_group.rank()}, dp_group size: {dp_group.size()}")
+    print(f"rank: {rank}, dp_group rank: {dp_group.rank()}, dp_group size: {dp_group.size()}, dp_group local rank: {dp_rank}")
+    print(f"rank: {rank}, pp_group rank: {pp_group.rank()}, pp_group size: {pp_group.size()}, pp_group local rank: {pp_rank}")
 
     # Register gradient hooks for DP sync
     # for param in stage.submod.parameters():
