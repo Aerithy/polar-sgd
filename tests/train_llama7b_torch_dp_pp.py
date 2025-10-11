@@ -262,15 +262,15 @@ def main():
     dp_group = dp_mesh.get_group()
 
     # Register gradient hooks for DP sync
-    for param in stage.submod.parameters():
-        if param.requires_grad:
-            param.register_hook(
-                lambda grad, group=dp_group: (
-                    print(f"rank: {dp_rank}/{rank} running all reduce on group: {dp_group.world_size}"),
-                    dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
-                    grad
-                )[-1]
-            )
+    # for param in stage.submod.parameters():
+    #     if param.requires_grad:
+    #         param.register_hook(
+    #             lambda grad, group=dp_group: (
+    #                 print(f"rank: {dp_rank}/{rank} running all reduce on group: {group.world_size}"),
+    #                 dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=group),
+    #                 grad
+    #             )[-1]
+    #         )
 
     # ... training loop (no manual all_reduce) ...
     global_step = 0
@@ -299,6 +299,10 @@ def main():
         else:
             schedule.step(attention_mask=attention_mask)
             
+        for param in stage.submod.parameters():
+            if param.requires_grad:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, group=dp_group)
+                
         optimizer.step()
         global_step += 1
 
