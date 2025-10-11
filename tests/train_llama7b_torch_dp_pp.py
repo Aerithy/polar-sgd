@@ -317,7 +317,7 @@ def main():
 
         if grads:
             # 融合 all_reduce
-            dist._all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=dp_group)
+            dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=dp_group)
                 
         optimizer.step()
         global_step += 1
