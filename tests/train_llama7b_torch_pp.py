@@ -216,6 +216,11 @@ def main():
         split="train"
     )
     
+    if rank == 0:
+        # os.makedirs(args.output_dir, exist_ok=True)
+        # print(f"✅ Training on {args.dataset} with seq_len={args.seq_length}, batch_size={args.batch_size}")
+        print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
+    
     def loss_fn(output, target):
         shift_logits = output[..., :-1, :].contiguous()
         shift_labels = target[..., 1:].contiguous()
