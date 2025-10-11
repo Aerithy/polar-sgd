@@ -286,6 +286,7 @@ def main():
     else:
         pbar = dataloader
     for batch in pbar:
+        print(f"rank: {rank} running pp on group: {pp_rank}")
         input_ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device) if stage.is_last else None
         attention_mask = batch["attention_mask"].to(device)
