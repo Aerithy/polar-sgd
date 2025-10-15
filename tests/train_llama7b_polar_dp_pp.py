@@ -245,7 +245,7 @@ def main():
         micro_batches=args.micro_batches,
         loss_fn=loss_fn,
         stage_model=stage_model,
-        train_dataloader=dataloader,
+        dataloader=dataloader,
     )
     
     trainer.train()
