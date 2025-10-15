@@ -2,6 +2,7 @@ import os
 import datetime
 import argparse
 import logging
+from turtle import back
 import numpy as np
 
 import torch
@@ -9,7 +10,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe
+from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
+from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe, PipelineStage
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -27,10 +29,10 @@ from transformers.models.bert.modeling_bert import (
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from utils.buffer import TensorBuffer
-from typing import List, Tuple
+from typing import List, Tuple, override
 
 from .util import get_partitions_and_pipe
-from .hooks import PolarCommHook
+from .hooks import PolarCommHook, GpipeHook
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -140,6 +142,103 @@ class NativePolarGradientCollector:
             self.comm_hook_handle.remove()
             self.comm_hook_handle = None
 
+class PolarParallel:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        device_mesh: DeviceMesh,
+        micro_batches: int, # you may call it the local step size
+        stage_model, 
+        loss_fn,
+        dataloader: DataLoader, 
+    ):
+        """__init__: initialize the PolarParallel
+        
+        Args:
+            args (argparse.Namespace): args from user argparse
+            dp_size (int): data parallel size
+            pp_size (int): pipeline parallel size
+            micro_batches (int): micro_batches for pipeline parallel
+            model_split_fn (_type_): manual model partition function
+            dataloader (DataLoader): training datasets
+        """
+        
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        
+        self.device_mesh = device_mesh
+        self.dp_mesh = self.device_mesh["dp"]
+        self.pp_mesh = self.device_mesh["pp"]
+        
+        local_rank = int(os.environ["LOCAL_RANK"])
+        self.device = torch.device(f"cuda:{local_rank}")
+        
+        stage_idx = self.pp_mesh.get_local_rank()
+        self.stage_model = stage_model
+        self.stage_model.to_empty(device=self.device, recures=True)
+        self.stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
+        
+        self.stage = PipelineStage(
+            self.stage_model,
+            stage_index=stage_idx,
+            num_stages=self.pp_mesh.size(),
+            device=self.device,
+            group=self.pp_mesh.get_group(),
+        )
+        
+        self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
+        
+        dp_rank = self.dp_mesh.get_local_rank()
+        
+        self.dataloader = dataloader
+        
+        self.schedule = ScheduleGPipe(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
+        
+        self.errors = [None for param in self.stage.submod.parameters()]
+        self.gradients = [None for param in self.stage.submod.parameters()]
+        self.grads_pred = [None for param in self.stage.submod.parameters()]
+        
+        self.stage.submod.register_full_backward_hook(GpipeHook(
+            device_mesh=self.device_mesh,
+            model=self.stage.submod,
+            gradient=self.gradients,
+            grads_pred=self.grads_pred,
+            errors=self.errors,
+            micro_batch_size=micro_batches,
+        ))
+        
+    def train(self):
+        global_step = 0
+        if self.stage.is_last:
+            pbar = tqdm(self.dataloader)
+        else:
+            pbar = self.dataloader
+            
+        for batch in pbar:
+            input_ids = batch["input_ids"].to(self.device)
+            labels = batch["labels"].to(self.device) if self.stage.is_last else None
+            attention_mask = batch["attention_mask"].to(self.device)
+
+            if self.optimizer:
+                self.optimizer.zero_grad()
+
+            if self.stage.is_first:
+                output = self.schedule.step(input_ids, attention_mask=attention_mask)
+            elif self.stage.is_last:
+                losses = []
+                self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                loss = torch.stack(losses).mean()
+                
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                if global_step % 100 == 0:
+                    print(f"Step {global_step}, Loss: {loss.item():.4f}")
+            else:
+                self.schedule.step(attention_mask=attention_mask)
+                    
+            self.optimizer.step()
+            global_step += 1
+        
 
 class PolarDataParallel:
     def __init__(

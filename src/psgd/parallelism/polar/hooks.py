@@ -35,6 +35,139 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class GpipeHook:
+    """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
+    """
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        grads: List[torch.Tensor],
+        grads_pred: List[torch.Tensor],
+        errors: List[torch.Tensor],
+        micro_batch_size: int,
+    ):
+        self.device_mesh = device_mesh
+        self.model = model
+        self.pp_mesh = device_mesh["pp"]
+        self.dp_mesh = device_mesh["dp"]
+        self.pp_group = self.pp_mesh.get_group()
+        self.dp_group = self.dp_mesh.get_group()
+        self.pp_local_rank = self.device_mesh.get_local_rank("pp")
+        self.dp_local_rank = self.device_mesh.get_local_rank("dp")
+        self.pp_size = self.pp_mesh.get_size()
+        self.dp_size = self.dp_mesh.get_size()
+        self.grads = grads
+        self.grads_pred = grads_pred
+        self.errors = errors
+        self.micro_batch_counter = 0
+        self.micro_batch_size = micro_batch_size
+        self.offset = 0
+        self.comm_handle = None
+
+    def __call__(self, *args, **kwds):
+        # self.micro_batch_counter += 1
+        device = self.model[0].parameters().__next__().device
+        logger.debug(f"[hook:call] pid={self.pp_mesh.get_local_rank()}, mb_counter={self.micro_batch_counter}/{self.micro_batch_size}, iter={self.iterations}")
+        
+        # 0 1|2 3|4 5|6 7| micro_batch_size / self.pp_size  micro_batch_count / (micro_batch_size / self.pp_size)
+        
+        if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
+            scale = self.micro_batch_size / (self.micro_batch_counter + 1)
+            self.grads_pred = [
+                [
+                    g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
+                    for g, e in zip(layer_g, layer_e)
+                ]
+                for layer_g, layer_e in zip(self.grads, self.errors)
+            ]
+            (
+                self.flattened_grad_pred,
+                self.num_tensors_per_list,
+                self.tensor_sizes,
+                self.original_shapes,
+            ) = self.flatten_nested_tensor_list(self.grads_pred)
+            self.comm_handle = dist.all_reduce(
+                self.flattened_grad_pred, group=self.dp_group, async_op=True
+            )
+            self.micro_batch_counter += 1
+        elif self.micro_batch_counter == self.micro_batch_size:
+            self.comm_handle.wait()
+            self.errors = self.grads - self.grads_pred
+            self.grads_pred = self.unflatten_nested_tensor_list(
+                self.flattened_grad_pred,
+                self.num_tensors_per_list,
+                self.tensor_sizes,
+                self.original_shapes,
+            )
+            for param, grad_pred in zip(self.model.parameters(), self.grads_pred):
+                param.grad = grad_pred
+            
+            self.micro_batch_counter = 0
+            
+    def flatten_nested_tensor_list(
+        self,
+        nested_list: List[List[torch.Tensor]],
+    ) -> Tuple[torch.Tensor, List[int], List[int], List[List[tuple]]]:
+        '''
+        Args:
+            nested_list (List[List[torch.Tensor]]): A nested list of tensors to be flattened
+        Returns:
+            final_flattened (torch.Tensor): A single 1D tensor containing all elements from the nested list
+            num_tensors_per_list (List[int]): Number of tensors in each sublist
+            tensor_sizes (List[int]): Number of elements in each tensor
+            original_shapes (List[List[tuple]]): Original shapes of each tensor in the nested list
+        '''
+        # 压平内层 List[torch.Tensor] 并记录结构 flatten each sublist of tensor (List[torch.Tensor]) and record structure of them
+        flattened_tensors = []
+        tensor_sizes = []  # 存储每个 Tensor 的元素数量 store the number of elements in each tensor
+        num_tensors_per_list = []  # 存储每个子列表的 Tensor 数量 store the number of tensors in each sublist
+
+        for sublist in nested_list:
+            num_tensors_per_list.append(len(sublist))  # 记录当前子列表的 Tensor 数量 record the number of tensors in current sublist
+            for tensor in sublist:
+                flattened = tensor.flatten() if tensor is not None else None # 压平当前 Tensor flatten the current Tensor
+                tensor_sizes.append(flattened.numel())  # 记录元素数量 record the number of elements
+                flattened_tensors.append(flattened)
+
+        # 将所有 Tensor 拼接成一个 1D Tensor cat all tensor in to a 1D Tensor
+        final_flattened = torch.cat(flattened_tensors)
+
+        original_shapes = [[t.shape for t in sublist] for sublist in nested_list]
+
+        return final_flattened, num_tensors_per_list, tensor_sizes, original_shapes
+
+    def unflatten_nested_tensor_list(
+        self,
+        flattened: torch.Tensor,
+        num_tensors_per_list: List[int],
+        tensor_sizes: List[int],
+        original_shapes: List[List[tuple]],  # 需额外传入原始形状
+    ) -> List[List[torch.Tensor]]:
+        '''
+        Args:
+            flattened (torch.Tensor): A single 1D tensor containing all elements from the nested list
+            num_tensors_per_list (List[int]): Number of tensors in each sublist
+            tensor_sizes (List[int]): Number of elements in each tensor
+            original_shapes (List[List[tuple]]): Original shapes of each tensor in the nested list
+        Returns:
+            restored_tensors (List[List[torch.Tensor]]): The nested list of tensors restored to their original shapes    
+        '''
+        # Step 1: 按 tensor_sizes 切分 1D Tensor
+        split_tensors = torch.split(flattened, tensor_sizes)
+
+        # Step 2: 恢复每个 Tensor 的原始形状
+        restored_tensors = []
+        idx = 0
+        for shape_group in original_shapes:
+            current_group = []
+            for shape in shape_group:
+                tensor = split_tensors[idx].view(shape)  # 恢复形状
+                current_group.append(tensor)
+                idx += 1
+            restored_tensors.append(current_group)
+
+        return restored_tensors
 
 class PolarCommHook:
     def __init__(
