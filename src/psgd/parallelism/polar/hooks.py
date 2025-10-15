@@ -55,8 +55,8 @@ class GpipeHook:
         self.dp_group = self.dp_mesh.get_group()
         self.pp_local_rank = self.device_mesh.get_local_rank("pp")
         self.dp_local_rank = self.device_mesh.get_local_rank("dp")
-        self.pp_size = self.pp_mesh.get_size()
-        self.dp_size = self.dp_mesh.get_size()
+        self.pp_size = self.pp_mesh.size()
+        self.dp_size = self.dp_mesh.size()
         self.grads = grads
         self.grads_pred = grads_pred
         self.errors = errors
