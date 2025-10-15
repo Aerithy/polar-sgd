@@ -28,7 +28,7 @@ from transformers.models.bert.modeling_bert import (
 )
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
-from utils.buffer import TensorBuffer
+from psgd.utils.buffer import TensorBuffer
 from typing import List, Tuple, override
 
 from .util import get_partitions_and_pipe
