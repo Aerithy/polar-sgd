@@ -67,7 +67,8 @@ class GpipeHook:
 
     def __call__(self, *args, **kwds):
         # self.micro_batch_counter += 1
-        device = self.model[0].parameters().__next__().device
+        device = next(self.model.parameters())
+        # device = dist.
         logger.debug(f"[hook:call] pid={self.pp_mesh.get_local_rank()}, mb_counter={self.micro_batch_counter}/{self.micro_batch_size}, iter={self.iterations}")
         
         # 0 1|2 3|4 5|6 7| micro_batch_size / self.pp_size  micro_batch_count / (micro_batch_size / self.pp_size)
