@@ -202,7 +202,7 @@ class PolarParallel:
         self.stage.submod.register_full_backward_hook(GpipeHook(
             device_mesh=self.device_mesh,
             model=self.stage.submod,
-            gradient=self.gradients,
+            grads=self.gradients,
             grads_pred=self.grads_pred,
             errors=self.errors,
             micro_batch_size=micro_batches,
