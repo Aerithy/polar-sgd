@@ -176,7 +176,7 @@ class PolarParallel:
         
         stage_idx = self.pp_mesh.get_local_rank()
         self.stage_model = stage_model
-        self.stage_model.to_empty(device=self.device, recures=True)
+        self.stage_model.to_empty(device=self.device, recurse=True)
         self.stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
         
         self.stage = PipelineStage(
