@@ -163,9 +163,9 @@ class PolarParallel:
             dataloader (DataLoader): training datasets
         """
         
-        dist.init_process_group(backend="nccl")
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
+        # dist.init_process_group(backend="nccl")
+        # rank = dist.get_rank()
+        # world_size = dist.get_world_size()
         
         self.device_mesh = device_mesh
         self.dp_mesh = self.device_mesh["dp"]
