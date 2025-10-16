@@ -95,13 +95,13 @@ def get_dataloader(
 
     # Distributed sampler
     sampler = None
-    if dist.is_initialized():
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            tokenized_dataset,
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
-            shuffle=True
-        )
+    # if dist.is_initialized():
+    #     sampler = torch.utils.data.distributed.DistributedSampler(
+    #         tokenized_dataset,
+    #         num_replicas=dist.get_world_size(),
+    #         rank=dist.get_rank(),
+    #         shuffle=True
+    #     )
 
     dataloader = DataLoader(
         tokenized_dataset,

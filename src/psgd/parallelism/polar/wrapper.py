@@ -239,17 +239,17 @@ class PolarParallel:
             self.optimizer.step()
             global_step += 1
             
-            grads = []
-            for param in self.stage.submod.parameters():
-                if param.requires_grad:
-                    # if param.grad is None:
-                    #     param.grad = torch.zeros_like(param)
-                    grads.append(param.grad)
+            # grads = []
+            # for param in self.stage.submod.parameters():
+            #     if param.requires_grad:
+            #         # if param.grad is None:
+            #         #     param.grad = torch.zeros_like(param)
+            #         grads.append(param.grad)
 
-            if grads:
-                # 融合 all_reduce
-                # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
-                dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
+            # if grads:
+            #     # 融合 all_reduce
+            #     # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
+            #     dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
         
 
 class PolarDataParallel:

@@ -70,7 +70,8 @@ class GpipeHook:
         device = next(self.model.parameters())
         # device = dist.
         logger.debug(f"[hook:call] pid={self.pp_mesh.get_local_rank()}, mb_counter={self.micro_batch_counter}/{self.micro_batch_size}")
-        
+        trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
+        logger.info(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         # 0 1|2 3|4 5|6 7| micro_batch_size / self.pp_size  micro_batch_count / (micro_batch_size / self.pp_size)
         
         if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
