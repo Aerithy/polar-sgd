@@ -92,7 +92,8 @@ class GpipeHook:
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
-            self.micro_batch_counter += 1
+        
+        self.micro_batch_counter += 1
         
         if self.micro_batch_counter == self.micro_batch_size:
             self.comm_handle.wait()
