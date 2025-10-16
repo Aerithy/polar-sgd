@@ -215,29 +215,48 @@ class PolarParallel:
         else:
             pbar = self.dataloader
             
-        for batch in pbar:
-            input_ids = batch["input_ids"].to(self.device)
-            labels = batch["labels"].to(self.device) if self.stage.is_last else None
-            attention_mask = batch["attention_mask"].to(self.device)
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            profile_memory=True,
+            record_shapes=True,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.args.using_hook}-{self.args.local_steps}"),
+            with_stack=True,
+        ) as prof:
+            for batch_idx, batch in enumerate(pbar):
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                attention_mask = batch["attention_mask"].to(self.device)
 
-            if self.optimizer:
-                self.optimizer.zero_grad()
+                if self.optimizer:
+                    self.optimizer.zero_grad()
 
-            if self.stage.is_first:
-                output = self.schedule.step(input_ids, attention_mask=attention_mask)
-            elif self.stage.is_last:
-                losses = []
-                self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
-                loss = torch.stack(losses).mean()
-                
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-                if global_step % 100 == 0:
-                    print(f"Step {global_step}, Loss: {loss.item():.4f}")
-            else:
-                self.schedule.step(attention_mask=attention_mask)
+                if self.stage.is_first:
+                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
+                elif self.stage.is_last:
+                    losses = []
+                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                    loss = torch.stack(losses).mean()
                     
-            self.optimizer.step()
-            global_step += 1
+                    pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                    if global_step % 100 == 0:
+                        print(f"Step {global_step}, Loss: {loss.item():.4f}")
+                else:
+                    self.schedule.step(attention_mask=attention_mask)
+                        
+                self.optimizer.step()
+                global_step += 1
+                prof.step()
+                
+                if self.stage.is_last:
+                    avg_train_loss = loss # / len(self.train_dataloader)
+                    self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
+                    # self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
+                    # print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
+                    
             
             # grads = []
             # for param in self.stage.submod.parameters():
