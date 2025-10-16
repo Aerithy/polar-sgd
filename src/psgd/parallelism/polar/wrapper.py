@@ -249,7 +249,7 @@ class PolarParallel:
             if grads:
                 # 融合 all_reduce
                 # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
-                dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_group)
+                dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
         
 
 class PolarDataParallel:
