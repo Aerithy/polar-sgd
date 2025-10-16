@@ -183,7 +183,7 @@ def main():
     
     assert world_size % pp_size == 0, f"world_size {world_size} must be divisible by PP_SIZE {pp_size}"
     dp_size = world_size // pp_size
-    device_mesh = init_device_mesh("cuda", (pp_size, dp_size), mesh_dim_names=("pp", "dp"))
+    device_mesh = init_device_mesh("cuda", (dp_size, pp_size), mesh_dim_names=("dp", "pp"))
     dp_mesh = device_mesh["dp"]
     pp_mesh = device_mesh["pp"]
 
