@@ -162,14 +162,10 @@ class PolarParallel:
             model_split_fn (_type_): manual model partition function
             dataloader (DataLoader): training datasets
         """
-        
-        # dist.init_process_group(backend="nccl")
-        # rank = dist.get_rank()
-        # world_size = dist.get_world_size()
-        
         self.device_mesh = device_mesh
         self.dp_mesh = self.device_mesh["dp"]
         self.pp_mesh = self.device_mesh["pp"]
+        self.micro_batches = micro_batches
         
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
@@ -201,16 +197,15 @@ class PolarParallel:
         self.gradients = [None for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
         
+    def train(self):
         self.stage.submod.register_full_backward_hook(GpipeHook(
             device_mesh=self.device_mesh,
             model=self.stage.submod,
             grads=self.gradients,
             grads_pred=self.grads_pred,
             errors=self.errors,
-            micro_batch_size=micro_batches,
+            micro_batch_size=self.micro_batches,
         ))
-        
-    def train(self):
         global_step = 0
         if self.stage.is_last:
             pbar = tqdm(self.dataloader)
@@ -256,22 +251,61 @@ class PolarParallel:
                 if self.stage.is_last:
                     avg_train_loss = loss # / len(self.train_dataloader)
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
-                    # self.writer.add_scalar('Accuracy/train', current_accuracy, epoch)
-                    # print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
-                    
+    
+    def _train(self):
+        global_step = 0
+        if self.stage.is_last:
+            pbar = tqdm(self.dataloader)
+        else:
+            pbar = self.dataloader
             
-            # grads = []
-            # for param in self.stage.submod.parameters():
-            #     if param.requires_grad:
-            #         # if param.grad is None:
-            #         #     param.grad = torch.zeros_like(param)
-            #         grads.append(param.grad)
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            profile_memory=True,
+            record_shapes=True,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
+            with_stack=True,
+        ) as prof:
+            for batch_idx, batch in enumerate(pbar):
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                attention_mask = batch["attention_mask"].to(self.device)
 
-            # if grads:
-            #     # 融合 all_reduce
-            #     # print(f"rank: {rank} running all reduce on group: {dp_group.rank()}")
-            #     dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
-        
+                if self.optimizer:
+                    self.optimizer.zero_grad()
+
+                if self.stage.is_first:
+                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
+                elif self.stage.is_last:
+                    losses = []
+                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                    loss = torch.stack(losses).mean()
+                    
+                    pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                    if global_step % 100 == 0:
+                        print(f"Step {global_step}, Loss: {loss.item():.4f}")
+                else:
+                    self.schedule.step(attention_mask=attention_mask)
+                        
+                self.optimizer.step()
+                global_step += 1
+                prof.step()
+                
+                if self.stage.is_last:
+                    avg_train_loss = loss # / len(self.train_dataloader)
+                    self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
+                
+                grads = []
+                for param in self.stage.submod.parameters():
+                    if param.requires_grad:
+                        grads.append(param.grad)
+
+                if grads:
+                    dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
 
 class PolarDataParallel:
     def __init__(
@@ -280,7 +314,6 @@ class PolarDataParallel:
         inter_group: torch.distributed.ProcessGroup,
         local_group: torch.distributed.ProcessGroup,
         model: torch.nn.Module = None,
-        # split_spec: dict = None,
         device: torch.device = None,
         tokenizer: transformers.PreTrainedTokenizer = None,
         train_dataloader: DataLoader = None,
