@@ -107,7 +107,7 @@ class GpipeHook:
                 self.original_shapes,
             )
             for param, grad_pred in zip(self.model.parameters(), self.grads_pred):
-                param.grad = grad_pred
+                param.grad = grad_pred.clone()
             
             self.micro_batch_counter = 0
             
