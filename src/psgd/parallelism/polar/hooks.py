@@ -92,7 +92,8 @@ class GpipeHook:
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
             self.micro_batch_counter += 1
-        elif self.micro_batch_counter == self.micro_batch_size:
+        
+        if self.micro_batch_counter == self.micro_batch_size:
             self.comm_handle.wait()
             self.errors = self.grads - self.grads_pred
             self.grads_pred = self.unflatten_nested_tensor_list(
