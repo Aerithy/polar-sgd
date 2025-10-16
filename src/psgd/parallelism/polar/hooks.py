@@ -77,11 +77,8 @@ class GpipeHook:
         if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
             self.grads_pred = [
-                [
-                    g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
-                    for g, e in zip(layer_g, layer_e)
-                ]
-                for layer_g, layer_e in zip(self.grads, self.errors)
+                g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
+                for g, e in zip(self.grads, self.errors)
             ]
             (
                 self.flattened_grad_pred,
