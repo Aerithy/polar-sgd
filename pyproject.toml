@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "A short description"
 authors = [{name = "Aerithy", email = "aerithlyt@163.com"}]
 
+dependencies = [
+    "torch",
+    "torchvision",
+    "datasets",
+    "transformers",
+    "sentencepiece",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["my_package*"]
