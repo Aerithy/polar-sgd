@@ -77,7 +77,7 @@ class GpipeHook:
         if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
             self.grads_pred = [
-                g * scale + e if e is not None and g is not None else torch.zeros(1,device=device)
+                g * scale + e if e is not None and g is not None else torch.zeros(g.shape, device=device)
                 for g, e in zip(self.grads, self.errors)
             ]
             (
@@ -97,7 +97,7 @@ class GpipeHook:
         if self.micro_batch_counter == self.micro_batch_size:
             self.comm_handle.wait()
             self.errors = [
-                g - p if p is not None and g is not None else torch.zeros(1, device=device)
+                g - p if p is not None and g is not None else torch.zeros(g.shape, device=device)
                 for g, p in zip(self.grads, self.grads_pred)
             ]
             self.grads_pred = self.unflatten_tensor_list(
