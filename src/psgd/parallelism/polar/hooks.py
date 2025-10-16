@@ -26,7 +26,7 @@ from transformers.models.bert.modeling_bert import (
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from psgd.utils.buffer import TensorBuffer
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .util import get_partitions_and_pipe
 
@@ -82,10 +82,12 @@ class GpipeHook:
             ]
             (
                 self.flattened_grad_pred,
-                self.num_tensors_per_list,
-                self.tensor_sizes,
+                self.is_none_mask,
+                self.tensor_numels,
                 self.original_shapes,
-            ) = self.flatten_nested_tensor_list(self.grads_pred)
+            ) = self.flatten_tensor_list(self.grads_pred)
+            self.flattened_grad_pred = self.flattened_grad_pred.to(device)
+            self.flattened_grad_pred.requires_grad_(True)
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
@@ -98,10 +100,10 @@ class GpipeHook:
                 g - p if p is not None and g is not None else torch.zeros(1, device=device)
                 for g, p in zip(self.grads, self.grads_pred)
             ]
-            self.grads_pred = self.unflatten_nested_tensor_list(
+            self.grads_pred = self.unflatten_tensor_list(
                 self.flattened_grad_pred,
-                self.num_tensors_per_list,
-                self.tensor_sizes,
+                self.is_none_mask,
+                self.tensor_numels,
                 self.original_shapes,
             )
             for param, grad_pred in zip(self.model.parameters(), self.grads_pred):
@@ -172,6 +174,87 @@ class GpipeHook:
             restored_tensors.append(current_group)
 
         return restored_tensors
+    
+    def flatten_tensor_list(
+        self,
+        tensor_list: List[Optional[torch.Tensor]],
+    ) -> Tuple[torch.Tensor, List[bool], List[int], List[torch.Size]]:
+        """
+        Flatten a list of tensors (some may be None) into a single 1D tensor.
+
+        Args:
+            tensor_list: List of tensors or None (e.g., [grad1, None, grad3, ...])
+
+        Returns:
+            flattened: Concatenated 1D tensor of all non-None tensors
+            is_none: Boolean list indicating which entries were None
+            tensor_numels: Number of elements for each non-None tensor (for splitting)
+            original_shapes: Original shapes of non-None tensors
+        """
+        flattened_tensors = []
+        is_none = []
+        tensor_numels = []
+        original_shapes = []
+
+        for tensor in tensor_list:
+            if tensor is None:
+                is_none.append(True)
+            else:
+                is_none.append(False)
+                flattened = tensor.reshape(-1)
+                flattened_tensors.append(flattened)
+                tensor_numels.append(flattened.numel())
+                original_shapes.append(tensor.shape)
+
+        if flattened_tensors:
+            flattened = torch.cat(flattened_tensors)
+        else:
+            # Edge case: all None
+            flattened = torch.tensor([], device=tensor_list[0].device if tensor_list and tensor_list[0] is not None else "cpu")
+
+        return flattened, is_none, tensor_numels, original_shapes
+
+
+    def unflatten_tensor_list(
+        self,
+        flattened: torch.Tensor,
+        is_none: List[bool],
+        tensor_numels: List[int],
+        original_shapes: List[torch.Size],
+    ) -> List[Optional[torch.Tensor]]:
+        """
+        Restore a flattened tensor back to the original list structure.
+
+        Args:
+            flattened: 1D tensor from flatten_tensor_list
+            is_none: Boolean mask from flatten_tensor_list
+            tensor_numels: Element counts of non-None tensors
+            original_shapes: Shapes of non-None tensors
+
+        Returns:
+            restored: List[Optional[Tensor]] matching original structure
+        """
+        if len(tensor_numels) > 0:
+            split_tensors = torch.split(flattened, tensor_numels)
+        else:
+            split_tensors = []
+
+        restored = []
+        none_idx = 0
+        tensor_idx = 0
+
+        for is_n in is_none:
+            if is_n:
+                restored.append(None)
+            else:
+                if tensor_idx < len(split_tensors):
+                    restored.append(split_tensors[tensor_idx].view(original_shapes[tensor_idx]))
+                    tensor_idx += 1
+                else:
+                    # Should not happen if inputs are consistent
+                    restored.append(None)
+
+        return restored
 
 class PolarCommHook:
     def __init__(
