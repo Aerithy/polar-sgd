@@ -199,14 +199,14 @@ class PolarParallel:
         self.gradients = [None for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
         
-        # self.stage.submod.register_full_backward_hook(GpipeHook(
-        #     device_mesh=self.device_mesh,
-        #     model=self.stage.submod,
-        #     grads=self.gradients,
-        #     grads_pred=self.grads_pred,
-        #     errors=self.errors,
-        #     micro_batch_size=micro_batches,
-        # ))
+        self.stage.submod.register_full_backward_hook(GpipeHook(
+            device_mesh=self.device_mesh,
+            model=self.stage.submod,
+            grads=self.gradients,
+            grads_pred=self.grads_pred,
+            errors=self.errors,
+            micro_batch_size=micro_batches,
+        ))
         
     def train(self):
         global_step = 0
