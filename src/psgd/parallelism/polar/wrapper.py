@@ -293,7 +293,6 @@ class PolarParallel:
                         
                 self.optimizer.step()
                 global_step += 1
-                prof.step()
                 
                 if self.stage.is_last:
                     avg_train_loss = loss # / len(self.train_dataloader)
@@ -306,6 +305,8 @@ class PolarParallel:
 
                 if grads:
                     dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
+                
+                prof.step()
 
 class PolarDataParallel:
     def __init__(
