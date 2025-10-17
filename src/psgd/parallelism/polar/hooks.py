@@ -67,6 +67,10 @@ class GpipeHook:
 
     def __call__(self, *args, **kwds):
         device = next(self.model.parameters()).device
+        for i, param in enumerate(self.model.parameters()):
+            if param.grad is not None:
+                self.grads[i] = param.grad
+        
         trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
         logger.debug(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         
