@@ -126,6 +126,7 @@ def partition_llama_model(config, stage_idx, num_stages):
     """
     with torch.device("meta"):
         model = MyLlamaForCausalLM(config)
+        print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
 
     num_layers = config.num_hidden_layers
     assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
