@@ -14,6 +14,7 @@ dependencies = [
     "datasets",
     "transformers",
     "sentencepiece",
+    "tensorboard",
 ]
 
 [tool.setuptools.packages.find]
