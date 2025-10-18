@@ -196,7 +196,7 @@ def main():
         vocab_size=32000,
         hidden_size=4096,
         intermediate_size=4096,
-        num_hidden_layers=32,
+        num_hidden_layers=16,
         num_attention_heads=32,
         rope_theta=10000.0,
         pad_token_id=0,
