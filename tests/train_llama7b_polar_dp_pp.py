@@ -204,12 +204,14 @@ def main():
     )
 
     # ✅ 手动分区
-    # stage_idx = pp_mesh.get_local_rank()
-    stage_idx = pp_mesh.get_coordinate()
+    stage_idx = pp_mesh.get_local_rank()
+    # stage_idx = pp_mesh.get_coordinate()
+    print(f"Stage index: {stage_idx} / {pp_size}")
     # stage_idx = pp_mesh.get_rank()
     stage_model = partition_llama_model(config, stage_idx, pp_size)
     
     dp_rank = dp_mesh.get_local_rank()
+    print(f"DP rank: {dp_rank} / {dp_size}")
     dataloader, tokenizer = get_dataloader(
         dataset_name=args.dataset,
         dataset_config=args.dataset_config,
