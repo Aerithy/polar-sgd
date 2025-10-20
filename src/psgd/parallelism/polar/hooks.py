@@ -111,6 +111,8 @@ class GpipeHook:
                 param.grad = grad_pred.clone()
             
             self.micro_batch_counter = 0
+        
+        print(f"[Rank {dist.get_rank()}] hook finished, MB{self.micro_batch_counter}")
             
     def flatten_nested_tensor_list(
         self,
