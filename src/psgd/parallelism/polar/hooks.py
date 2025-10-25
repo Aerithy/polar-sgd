@@ -89,6 +89,7 @@ class GpipeHook:
             ) = self.flatten_tensor_list(self.grads_pred)
             self.flattened_grad_pred = self.flattened_grad_pred.to(device)
             self.flattened_grad_pred.requires_grad_(True)
+            print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter} running all reduce")
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
