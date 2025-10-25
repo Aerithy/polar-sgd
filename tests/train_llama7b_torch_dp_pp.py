@@ -93,25 +93,25 @@ def get_dataloader(
     tokenized_dataset = TokenizedDataset(dataset, tokenizer, seq_length=seq_length)
 
     # Distributed sampler
-    sampler = None
-    if dist.is_initialized():
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            tokenized_dataset,
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
-            shuffle=True
-        )
+    # sampler = None
+    # if dist.is_initialized():
+    #     sampler = torch.utils.data.distributed.DistributedSampler(
+    #         tokenized_dataset,
+    #         num_replicas=dist.get_world_size(),
+    #         rank=dist.get_rank(),
+    #         shuffle=True
+    #     )
 
-    dataloader = DataLoader(
-        tokenized_dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        shuffle=(sampler is None),
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    return dataloader, tokenizer
+    # dataloader = DataLoader(
+    #     tokenized_dataset,
+    #     batch_size=batch_size,
+    #     sampler=sampler,
+    #     shuffle=(sampler is None),
+    #     num_workers=num_workers,
+    #     pin_memory=True,
+    #     drop_last=True
+    # )
+    return tokenized_dataset, tokenizer
 
 # -----------------------------
 # Manual Model Partitioning (Option 1)
@@ -221,8 +221,9 @@ def main():
     optimizer = torch.optim.AdamW(stage.submod.parameters(), lr=1e-4) # if stage.is_last else None
     
     dp_rank = dp_mesh.get_local_rank()
+    dp_group_idx = dist.get_rank() // PP_SIZE
     # dp_rank = dp_mesh.get_rank()
-    dataloader, tokenizer = get_dataloader(
+    tokenized_dataset, tokenizer = get_dataloader(
         dataset_name=args.dataset,
         dataset_config=args.dataset_config,
         tokenizer_name=args.tokenizer,
@@ -232,13 +233,13 @@ def main():
         split="train"
     )
     sampler = DistributedSampler(
-        dataloader.dataset,
+        tokenized_dataset.dataset,
         num_replicas=dp_size,
-        rank=dp_rank,
+        rank=dp_group_idx,
         shuffle=True,
     )
-    dataloader = DataLoader(
-        dataloader.dataset,
+    tokenized_dataset = DataLoader(
+        tokenized_dataset.dataset,
         batch_size=args.batch_size,
         sampler=sampler,
         pin_memory=False,
@@ -283,9 +284,9 @@ def main():
     # ... training loop (no manual all_reduce) ...
     global_step = 0
     if stage.is_last:
-        pbar = tqdm(dataloader, desc=f"Epoch {args.epochs}")
+        pbar = tqdm(tokenized_dataset, desc=f"Epoch {args.epochs}")
     else:
-        pbar = dataloader
+        pbar = tokenized_dataset
     for batch in pbar:
         # print(f"rank: {rank} running pp on group: {pp_rank}")
         input_ids = batch["input_ids"].to(device)
