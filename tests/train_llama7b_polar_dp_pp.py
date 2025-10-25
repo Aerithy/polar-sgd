@@ -231,12 +231,12 @@ def main():
     #     rank=dp_rank,
     #     shuffle=True,
     # )
-    dataloader = DataLoader(
-        dataloader.dataset,
-        batch_size=args.batch_size,
-        # sampler=sampler,
-        pin_memory=False,
-    )
+    # dataloader = DataLoader(
+    #     dataloader.dataset,
+    #     batch_size=args.batch_size,
+    #     # sampler=sampler,
+    #     pin_memory=False,
+    # )
     
     def loss_fn(output, target):
         shift_logits = output[..., :-1, :].contiguous()
