@@ -238,12 +238,21 @@ def main():
         rank=dp_group_idx,
         shuffle=True,
     )
-    tokenized_dataset = DataLoader(
-        tokenized_dataset.dataset,
+    dataloader = DataLoader(
+        tokenized_dataset,
         batch_size=args.batch_size,
         sampler=sampler,
-        pin_memory=False,
+        shuffle=(sampler is None),
+        num_workers=2,
+        pin_memory=True,
+        drop_last=True
     )
+    # tokenized_dataset = DataLoader(
+    #     tokenized_dataset.dataset,
+    #     batch_size=args.batch_size,
+    #     sampler=sampler,
+    #     pin_memory=False,
+    # )
     
     def loss_fn(output, target):
         shift_logits = output[..., :-1, :].contiguous()
