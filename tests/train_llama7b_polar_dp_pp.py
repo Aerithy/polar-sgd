@@ -60,7 +60,6 @@ class TokenizedDataset(Dataset):
         }
 
 def get_dataloader(
-    device_mesh: torch.distributed.device_mesh.DeviceMesh,
     pp_size: int,
     dataset_name: str = "wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
@@ -217,6 +216,7 @@ def main():
     dp_rank = dp_mesh.get_local_rank()
     print(f"DP rank: {dp_rank} / {dp_size}")
     dataloader, tokenizer = get_dataloader(
+        pp_size=pp_size,
         dataset_name=args.dataset,
         dataset_config=args.dataset_config,
         tokenizer_name=args.tokenizer,
