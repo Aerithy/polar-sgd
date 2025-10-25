@@ -202,8 +202,8 @@ def main():
     )
 
     # ✅ 手动分区
-    # stage_idx = pp_mesh.get_local_rank()
-    stage_idx = pp_mesh.get_coordinate()
+    stage_idx = pp_mesh.get_local_rank()
+    # stage_idx = pp_mesh.get_coordinate()
     # stage_idx = pp_mesh.get_rank()
     stage_model = partition_llama_model(config, stage_idx, PP_SIZE)
     stage_model.to_empty(device=device, recurse=True)
