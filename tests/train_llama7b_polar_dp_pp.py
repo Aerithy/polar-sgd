@@ -60,6 +60,8 @@ class TokenizedDataset(Dataset):
         }
 
 def get_dataloader(
+    device_mesh: torch.distributed.device_mesh.DeviceMesh,
+    pp_size: int,
     dataset_name: str = "wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     tokenizer_name: str = "meta-llama/Llama-2-7b-hf",  # 或使用 "hf-internal-testing/llama-tokenizer" 如果无权限
@@ -95,13 +97,13 @@ def get_dataloader(
 
     # Distributed sampler
     sampler = None
-    # if dist.is_initialized():
-    #     sampler = torch.utils.data.distributed.DistributedSampler(
-    #         tokenized_dataset,
-    #         num_replicas=dist.get_world_size(),
-    #         rank=dist.get_rank(),
-    #         shuffle=True
-    #     )
+    if dist.is_initialized():
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            tokenized_dataset,
+            num_replicas=dist.get_world_size() // pp_size,
+            rank=dist.get_rank() // pp_size,
+            shuffle=True
+        )
 
     dataloader = DataLoader(
         tokenized_dataset,
@@ -223,16 +225,16 @@ def main():
         use_auth_token=args.use_auth_token,
         split="train"
     )
-    sampler = DistributedSampler(
-        dataloader.dataset,
-        num_replicas=dp_size,
-        rank=dp_rank,
-        shuffle=True,
-    )
+    # sampler = DistributedSampler(
+    #     dataloader.dataset,
+    #     num_replicas=dp_size,
+    #     rank=dp_rank,
+    #     shuffle=True,
+    # )
     dataloader = DataLoader(
         dataloader.dataset,
         batch_size=args.batch_size,
-        sampler=sampler,
+        # sampler=sampler,
         pin_memory=False,
     )
     
