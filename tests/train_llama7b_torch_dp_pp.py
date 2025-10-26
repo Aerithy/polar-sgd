@@ -157,6 +157,32 @@ def partition_llama_model(config, stage_idx, num_stages):
 
     return model
 
+def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
+    # 初始化设备网格
+    # 使用 (DP_SIZE, PP_SIZE) 但确保 PP 在同一机器内
+    pp_mesh = device_mesh["pp"]
+    
+    # 验证 PP 组是否在同一机器
+    pp_group = pp_mesh.get_group()
+    pp_ranks = dist.get_process_group_ranks(pp_group)
+    
+    # 获取所有 PP 组进程的主机名
+    hostnames = []
+    for rank in pp_ranks:
+        if rank == dist.get_rank():
+            hostname = os.uname().nodename
+        else:
+            hostname = None
+        hostname = dist.broadcast_object(hostname, src=rank, group=pp_group)
+        hostnames.append(hostname)
+    
+    if dist.get_rank() in pp_ranks[0]:
+        print(f"PP Group {pp_ranks}: Hostnames {set(hostnames)}")
+    
+    # 确保所有 PP 组进程在同一主机
+    if len(set(hostnames)) > 1:
+        raise RuntimeError(f"PP group spans multiple machines: {set(hostnames)}")
+
 # -----------------------------
 # Main Training Loop
 # -----------------------------
@@ -185,6 +211,8 @@ def main():
     device_mesh = init_device_mesh("cuda", (dp_size, PP_SIZE), mesh_dim_names=("dp", "pp"))
     dp_mesh = device_mesh["dp"]
     pp_mesh = device_mesh["pp"]
+    
+    
 
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{local_rank}")
