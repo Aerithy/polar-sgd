@@ -173,9 +173,9 @@ def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
     hostnames = []
     for rank in pp_ranks:
         if rank == dist.get_rank():
-            hostnames = os.uname().nodename
+            hostnames.append(os.uname().nodename)
         else:
-            hostnames = None
+            hostnames.append(None)
         # hostname = dist.broadcast_object(hostname, src=rank, group=pp_group)
         # hostnames.append(hostname)
     
