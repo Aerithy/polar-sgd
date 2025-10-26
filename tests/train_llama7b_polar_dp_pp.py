@@ -1,3 +1,4 @@
+from ast import mod
 from psgd.parallelism.polar.wrapper import PolarParallel
 
 from gettext import dpgettext
@@ -140,23 +141,42 @@ def partition_llama_model(config, stage_idx, num_stages):
     # layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
     # model.model.layers = torch.nn.ModuleDict(layers_dict)
 
+    # 获取所有层的key列表
+    all_layer_keys = list(model.model.layers.keys())
+    # 删除不属于当前stage的层
+    for layer_key in all_layer_keys:
+        layer_idx = int(layer_key)
+        if not (start_layer <= layer_idx < end_layer):
+            del model.model.layers[layer_key]
+            
+    # 重新构建 layers 保证顺序正确
+    current_stage_layers = {}
+    for i in range(start_layer, end_layer):
+        if str(i) in model.model.layers:
+            current_stage_layers[str(i)] = model.model.layers[str(i)]
+    
+    model.model.layers = torch.nn.ModuleDict(current_stage_layers)
+    
     # 删除不属于当前 stage 的层
-    for i in list(model.model.layers.keys()):
-        if not (start_layer <= int(i) < end_layer):
-            del model.model.layers[i]
+    # for i in list(model.model.layers.keys()):
+    #     if not (start_layer <= int(i) < end_layer):
+    #         del model.model.layers[i]
 
     # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
     if stage_idx == 0:
         model.lm_head = None
         model.model.final_norm = None
+        print(f"Stage {stage_idx}: Keeping embed_tokens, removing lm_head and final_norm")
     # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
     elif stage_idx == num_stages - 1:
         model.model.embed_tokens = None
-    # 中间 stage: 移除所有非 layer 组件
+        print(f"Stage {stage_idx}: Keeping lm_head and final_norm, removing embed_tokens")
+    # middle stage: 移除所有非 layer 组件
     else:
         model.model.embed_tokens = None
         model.model.final_norm = None
         model.lm_head = None
+        print(f"Stage {stage_idx}: Removing embed_tokens, final_norm, and lm_head")
 
     return model
 

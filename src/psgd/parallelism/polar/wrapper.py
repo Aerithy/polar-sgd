@@ -199,6 +199,8 @@ class PolarParallel:
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
         
+        print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
+        
     def train(self):
         self.stage.submod.register_full_backward_hook(GpipeHook(
             device_mesh=self.device_mesh,

@@ -155,12 +155,12 @@ class LlamaModel(nn.Module):
         head_dim = config.hidden_size // config.num_attention_heads
         self.rotary_emb = RotaryEmbedding(head_dim, config.rope_theta)
         
-        self.split_points = set()
+        # self.split_points = set()
 
         self._init_weights()
         
-    def set_split_points(self, split_indices: list):
-        self.split_points = set(split_indices)
+    # def set_split_points(self, split_indices: list):
+    #     self.split_points = set(split_indices)
 
     def _init_weights(self):
         # Simple init; for production, consider scaled init per LLaMA
@@ -185,30 +185,29 @@ class LlamaModel(nn.Module):
             assert input_ids.dim() == 2
             x = self.embed_tokens(input_ids)
             seq_len = x.shape[1]
-            attention_mask = None
+            # attention_mask = None
             # Use attention_mask
         else:
             # Stage 1+: x is hidden states
             assert input_ids.dim() == 3
             x = input_ids
             seq_len = x.shape[1]
-            attention_mask = None  # ←←← Ignore mask in non-first stage
         
-        # if attention_mask is not None and attention_mask.dtype != x.dtype:
-        #     attention_mask = attention_mask.to(dtype=x.dtype)
-        
-        # seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
         
         # rank = dist.get_rank() if dist.is_initialized() else 0
         # print(f"Rank {rank}: Processing {len(self.layers)} layers, split points: {self.split_points}")
-    
-        for layer in self.layers.values():
+        layer_keys = sorted([int(k) for k in self.layers.keys()])
+        for layer_key in layer_keys:
+            layer = self.layers[str(layer_key)]
             x = layer(x, cos, sin, attention_mask=attention_mask)
-            # if i in self.split_points:
-                # x = pipe_split(x)
-                # print(f"Rank {rank}: Split point at layer {i}")
-                # pipe_split()
+        
+        # for layer in self.layers.values():
+        #     x = layer(x, cos, sin, attention_mask=attention_mask)
+        #     # if i in self.split_points:
+        #         # x = pipe_split(x)
+        #         # print(f"Rank {rank}: Split point at layer {i}")
+        #         # pipe_split()
         
         if self.final_norm is not None:
             x = self.final_norm(x)
