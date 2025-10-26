@@ -179,7 +179,7 @@ def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
         # hostname = dist.broadcast_object(hostname, src=rank, group=pp_group)
         # hostnames.append(hostname)
     
-    if dist.get_rank() in pp_ranks[0]:
+    if dist.get_rank() in pp_ranks:
         print(f"PP Group {pp_ranks}: Hostnames {set(hostnames)}")
     
     # 确保所有 PP 组进程在同一主机
