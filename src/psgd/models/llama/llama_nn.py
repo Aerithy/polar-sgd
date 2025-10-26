@@ -105,7 +105,7 @@ class LlamaAttention(nn.Module):
         # Key padding mask: attention_mask [B, T], 1 for valid, 0 for pad
         if attention_mask is not None:
             # convert to [B, 1, 1, T] additive mask with -inf on pads
-            mask = (1.0 - attention_mask.float()) * -1e10
+            mask = (1.0 - attention_mask.float()) * torch.finfo(x.dtype).min
             attn_scores = attn_scores + mask[:, None, None, :].to(attn_scores.device)
 
         attn = torch.softmax(attn_scores, dim=-1)
@@ -171,16 +171,28 @@ class LlamaModel(nn.Module):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        # input_ids: [B, T], attention_mask: [B, T]
+        # input_ids: [B, T], attention_mask: [B, T]; 
+        # x is either [B, T] (token IDs) or [B, T, C] (hidden states)
+        # if self.embed_tokens is not None:
+        #     x = self.embed_tokens(input_ids)  # [B, T, C]
+        # else:
+        #     x = input_ids
         if self.embed_tokens is not None:
-            x = self.embed_tokens(input_ids)  # [B, T, C]
+            # Stage 0: x is token IDs
+            assert x.dim() == 2
+            x = self.embed_tokens(x)
+            seq_len = x.shape[1]
+            # Use attention_mask
         else:
-            x = input_ids
+            # Stage 1+: x is hidden states
+            assert x.dim() == 3
+            seq_len = x.shape[1]
+            attention_mask = None  # ←←← Ignore mask in non-first stage
         
-        if attention_mask is not None and attention_mask.dtype != x.dtype:
-            attention_mask = attention_mask.to(dtype=x.dtype)
+        # if attention_mask is not None and attention_mask.dtype != x.dtype:
+        #     attention_mask = attention_mask.to(dtype=x.dtype)
         
-        seq_len = input_ids.shape[1]
+        # seq_len = input_ids.shape[1]
         cos, sin = self.rotary_emb._build_freqs(seq_len, x.device, x.dtype)
         
         # rank = dist.get_rank() if dist.is_initialized() else 0

@@ -176,15 +176,9 @@ def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
             hostnames.append(os.uname().nodename)
         else:
             hostnames.append(None)
-        # hostname = dist.broadcast_object(hostname, src=rank, group=pp_group)
-        # hostnames.append(hostname)
     
     if dist.get_rank() in pp_ranks:
         print(f"PP Group {pp_ranks}: Hostnames {hostnames}")
-    
-    # 确保所有 PP 组进程在同一主机
-    # if len(set(hostnames)) > 1:
-    #     raise RuntimeError(f"PP group spans multiple machines: {set(hostnames)}")
 
 # -----------------------------
 # Main Training Loop
