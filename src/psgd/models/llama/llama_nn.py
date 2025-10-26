@@ -180,7 +180,7 @@ class LlamaModel(nn.Module):
         if self.embed_tokens is not None:
             # Stage 0: x is token IDs
             assert input_ids.dim() == 2
-            x = self.embed_tokens(x)
+            x = self.embed_tokens(input_ids)
             seq_len = x.shape[1]
             # Use attention_mask
         else:
