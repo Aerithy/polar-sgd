@@ -162,7 +162,7 @@ class PolarParallel:
             model_split_fn (_type_): manual model partition function
             dataloader (DataLoader): training datasets
         """
-        os.eviron["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
         self.device_mesh = device_mesh
         self.dp_mesh = self.device_mesh["dp"]
         self.pp_mesh = self.device_mesh["pp"]
