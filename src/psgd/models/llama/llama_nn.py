@@ -182,14 +182,14 @@ class LlamaModel(nn.Module):
         #     x = input_ids
         if self.embed_tokens is not None:
             # Stage 0: x is token IDs
-            assert x.dim() == 2
+            assert input_ids.dim() == 2
             x = self.embed_tokens(input_ids)
             seq_len = x.shape[1]
             attention_mask = None
             # Use attention_mask
         else:
             # Stage 1+: x is hidden states
-            assert x.dim() == 3
+            assert input_ids.dim() == 3
             x = input_ids
             seq_len = x.shape[1]
             attention_mask = None  # ←←← Ignore mask in non-first stage
