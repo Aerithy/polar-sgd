@@ -186,7 +186,8 @@ class LlamaModel(nn.Module):
         else:
             # Stage 1+: x is hidden states
             assert input_ids.dim() == 3
-            seq_len = x.shape[1]
+            x = input_ids
+            seq_len = input_ids.shape[1]
             attention_mask = None  # ←←← Ignore mask in non-first stage
         
         # if attention_mask is not None and attention_mask.dtype != x.dtype:
