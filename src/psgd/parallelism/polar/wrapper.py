@@ -232,10 +232,10 @@ class PolarParallel:
                     self.optimizer.zero_grad()
 
                 if self.stage.is_first:
-                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
+                    output = self.schedule.step(input_ids) #, attention_mask=attention_mask)
                 elif self.stage.is_last:
                     losses = []
-                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                    self.schedule.step(target=labels, losses=losses) #, attention_mask=attention_mask)  # target 传给 last stage 的 forward
                     loss = torch.stack(losses).mean()
                     
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
