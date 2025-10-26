@@ -35,6 +35,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def print_io_shape_hook(module, input, output, name):
+    print(f"Stage: {name}")
+    print(f"  Input shape: {[inp.shape for inp in input]}")
+    if isinstance(output, torch.Tensor):
+        print(f"  Output shape: {output.shape}")
+    else:
+        print(f"  Output shape: {[out.shape for out in output]}")
+    print("-" * 40)
+
 class GpipeHook:
     """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
     """

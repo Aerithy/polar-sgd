@@ -32,7 +32,7 @@ from psgd.utils.buffer import TensorBuffer
 from typing import List, Tuple
 
 from .util import get_partitions_and_pipe
-from .hooks import PolarCommHook, GpipeHook
+from .hooks import PolarCommHook, GpipeHook, print_io_shape_hook
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -174,6 +174,7 @@ class PolarParallel:
         self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}")
         
         stage_idx = self.pp_mesh.get_local_rank()
+        self.stage_idx = stage_idx
         self.stage_model = stage_model
         self.stage_model.to_empty(device=self.device, recurse=True)
         self.stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
@@ -207,6 +208,9 @@ class PolarParallel:
             errors=self.errors,
             micro_batch_size=self.micro_batches,
         ))
+        self.stage.submod.register_forward_hook(
+            lambda mod, inp, out: print_io_shape_hook(mod, inp, out, f"stage:{self.stage.stage_index}")
+        )
         global_step = 0
         if self.stage.is_last:
             pbar = tqdm(self.dataloader)
