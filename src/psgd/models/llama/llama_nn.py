@@ -171,15 +171,6 @@ class LlamaModel(nn.Module):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-    # def forward(self, x: torch.Tensor):
-        # input_ids: [B, T], attention_mask: [B, T]; 
-        # x is either:
-        # - [B, T] (token IDs)
-        # - [B, T, C] (hidden states)
-        # if self.embed_tokens is not None:
-        #     x = self.embed_tokens(input_ids)  # [B, T, C]
-        # else:
-        #     x = input_ids
         if self.embed_tokens is not None:
             # Stage 0: x is token IDs
             assert input_ids.dim() == 2

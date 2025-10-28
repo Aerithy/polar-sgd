@@ -250,7 +250,7 @@ class PolarParallel:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
                     # self.schedule.step(attention_mask=attention_mask)
-                    self.schedule.step()
+                    self.schedule.step(output, attention_mask=attention_mask)
                         
                 self.optimizer.step()
                 global_step += 1
