@@ -119,64 +119,85 @@ def get_dataloader(
 # -----------------------------
 # Manual Model Partitioning (Option 1)
 # -----------------------------
-def partition_llama_model(config, stage_idx, num_stages):
+# def partition_llama_model(config, stage_idx, num_stages):
+#     """
+#     Manually partition LLaMA model for pipeline parallelism.
+#     - Initialize on 'meta' to avoid OOM
+#     - Keep only layers assigned to this stage
+#     - Remove unused components (embeddings, lm_head, etc.)
+#     """
+#     with torch.device("meta"):
+#         model = MyLlamaForCausalLM(config)
+#         print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
+
+#     num_layers = config.num_hidden_layers
+#     assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
+#     layers_per_stage = num_layers // num_stages
+
+#     start_layer = stage_idx * layers_per_stage
+#     end_layer = (stage_idx + 1) * layers_per_stage
+    
+#     # 删除不属于当前 stage 的层
+#     for i in list(model.model.layers.keys()):
+#         if not (start_layer <= int(i) < end_layer):
+#             del model.model.layers[i]
+
+#     # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
+#     if stage_idx == 0:
+#         model.lm_head = None
+#         model.model.final_norm = None
+#         print(f"Stage {stage_idx}: Keeping embed_tokens, removing lm_head and final_norm")
+#     # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
+#     elif stage_idx == num_stages - 1:
+#         model.model.embed_tokens = None
+#         print(f"Stage {stage_idx}: Keeping lm_head and final_norm, removing embed_tokens")
+#     # middle stage: 移除所有非 layer 组件
+#     else:
+#         model.model.embed_tokens = None
+#         model.model.final_norm = None
+#         model.lm_head = None
+#         print(f"Stage {stage_idx}: Removing embed_tokens, final_norm, and lm_head")
+
+#     return model
+
+def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
     """
-    Manually partition LLaMA model for pipeline parallelism.
+    Partition LLaMA model for pipeline parallelism.
     - Initialize on 'meta' to avoid OOM
     - Keep only layers assigned to this stage
     - Remove unused components (embeddings, lm_head, etc.)
     """
     with torch.device("meta"):
         model = MyLlamaForCausalLM(config)
-        print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
+        if dist.is_initialized() and dist.get_rank() == 0:
+            total_params = sum(p.numel() for p in model.parameters()) / 1e9
+            print(f"[Rank 0] Model params: {total_params:.2f}B")
 
     num_layers = config.num_hidden_layers
-    assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
+
+    # Flexible layer assignment (supports non-divisible cases)
     layers_per_stage = num_layers // num_stages
+    remainder = num_layers % num_stages
+    start_layer = stage_idx * layers_per_stage + min(stage_idx, remainder)
+    end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
 
-    start_layer = stage_idx * layers_per_stage
-    end_layer = (stage_idx + 1) * layers_per_stage
-
-    # 转换 layers 为 ModuleDict（保留 FQN）
-    # layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
-    # model.model.layers = torch.nn.ModuleDict(layers_dict)
-
-    # 获取所有层的key列表
-    # all_layer_keys = list(model.model.layers.keys())
-    # # 删除不属于当前stage的层
-    # for layer_key in all_layer_keys:
-    #     layer_idx = int(layer_key)
-    #     if not (start_layer <= layer_idx < end_layer):
-    #         del model.model.layers[layer_key]
-            
-    # # 重新构建 layers 保证顺序正确
-    # current_stage_layers = {}
-    # for i in range(start_layer, end_layer):
-    #     if str(i) in model.model.layers:
-    #         current_stage_layers[str(i)] = model.model.layers[str(i)]
-    
-    # model.model.layers = torch.nn.ModuleDict(current_stage_layers)
-    
-    # 删除不属于当前 stage 的层
+    # Remove layers not assigned to this stage
     for i in list(model.model.layers.keys()):
         if not (start_layer <= int(i) < end_layer):
             del model.model.layers[i]
 
-    # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
+    # Stage 0: keep embed_tokens, remove lm_head and final_norm
     if stage_idx == 0:
         model.lm_head = None
         model.model.final_norm = None
-        print(f"Stage {stage_idx}: Keeping embed_tokens, removing lm_head and final_norm")
-    # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
+    # Last stage: keep lm_head and final_norm, remove embed_tokens
     elif stage_idx == num_stages - 1:
         model.model.embed_tokens = None
-        print(f"Stage {stage_idx}: Keeping lm_head and final_norm, removing embed_tokens")
-    # middle stage: 移除所有非 layer 组件
+    # Middle stages: remove all non-layer components
     else:
         model.model.embed_tokens = None
         model.model.final_norm = None
         model.lm_head = None
-        print(f"Stage {stage_idx}: Removing embed_tokens, final_norm, and lm_head")
 
     return model
 
