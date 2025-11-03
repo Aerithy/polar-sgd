@@ -77,4 +77,21 @@ $$
 
 ## DP&PP part
 
-<img src="./polar-pp.png">
+有这样一个场景，数据在广域分散分布，为了避免进行数据的统一收集并预处理，选用数据并行使得数据可以在分散的地域进行预处理工作。从而构成了以广域分布的节点或集群为单位的广域数据并行。以获取更高的吞吐率。同时，对于大型模型，在集群内部采用流水线并行的方式进行训练。
+
+从而引发的一些挑战是，跨域all-reduce的时间不能被pp的分块掩盖，导致跨域all-reduce的出口带宽争用：如图stage4的all-reduce还没执行完，stage3的all-reduce就需要去发送了，导致stage3实际执行all-reduce的时间被延迟了。同理，这个影响从stage4反向影响到stage1，从而直接影响到下一轮step的执行。
+
+<img src="./polar-pp_light.png">
+
+### 实现
+
+尝试实现一个通信线程池，利用chunked all-reduce的思想，将单个较长的all-reduce划分多块进行发送，但是和p2p的执行放在一起。进行pp优先调度方案。默认无pp通信时，执行下一块的chunked all-reduce。
+
+由于Pytorch + nccl默认不提供任何的通信优先级或抢占式调度机制。因此，要实现这一目标，需要
+
+使用信号量/互斥锁和事件标志，确保 p2p 发起时，all-reduce要么尚未开始，要么等待 p2p 完成
+
+如果 all-reduce 由于节点间没有同步从而 hang 住了，此时需要打开GPU多流通信，多流通信机制使得 p2p 操作在此时可以和 all-reduce 并发执行，不会由于allreduce hang住而阻塞
+
+
+对于每个pp stage，建立其梯度空间和补偿空间。由于我们只传部分microbatch产生的梯度数据，所以对于其他microbatch产生的数据，需要在补偿空间中进行累加，直到需要进行下一次all-reduce时，将这个补偿值累计到这个all-reduce中来更新。
