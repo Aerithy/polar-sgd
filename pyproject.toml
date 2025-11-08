@@ -15,6 +15,7 @@ dependencies = [
     "transformers",
     "sentencepiece",
     "tensorboard",
+    "torch_tb_profiler",
 ]
 
 [tool.setuptools.packages.find]
