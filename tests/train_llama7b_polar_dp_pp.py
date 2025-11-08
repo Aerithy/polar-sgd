@@ -119,47 +119,6 @@ def get_dataloader(
 # -----------------------------
 # Manual Model Partitioning (Option 1)
 # -----------------------------
-# def partition_llama_model(config, stage_idx, num_stages):
-#     """
-#     Manually partition LLaMA model for pipeline parallelism.
-#     - Initialize on 'meta' to avoid OOM
-#     - Keep only layers assigned to this stage
-#     - Remove unused components (embeddings, lm_head, etc.)
-#     """
-#     with torch.device("meta"):
-#         model = MyLlamaForCausalLM(config)
-#         print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
-
-#     num_layers = config.num_hidden_layers
-#     assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
-#     layers_per_stage = num_layers // num_stages
-
-#     start_layer = stage_idx * layers_per_stage
-#     end_layer = (stage_idx + 1) * layers_per_stage
-    
-#     # 删除不属于当前 stage 的层
-#     for i in list(model.model.layers.keys()):
-#         if not (start_layer <= int(i) < end_layer):
-#             del model.model.layers[i]
-
-#     # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
-#     if stage_idx == 0:
-#         model.lm_head = None
-#         model.model.final_norm = None
-#         print(f"Stage {stage_idx}: Keeping embed_tokens, removing lm_head and final_norm")
-#     # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
-#     elif stage_idx == num_stages - 1:
-#         model.model.embed_tokens = None
-#         print(f"Stage {stage_idx}: Keeping lm_head and final_norm, removing embed_tokens")
-#     # middle stage: 移除所有非 layer 组件
-#     else:
-#         model.model.embed_tokens = None
-#         model.model.final_norm = None
-#         model.lm_head = None
-#         print(f"Stage {stage_idx}: Removing embed_tokens, final_norm, and lm_head")
-
-#     return model
-
 def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
     """
     Partition LLaMA model for pipeline parallelism.
@@ -186,6 +145,11 @@ def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
         if not (start_layer <= int(i) < end_layer):
             del model.model.layers[i]
 
+    # 如果当前 stage 没有分到任何 layer，补一个 nn.Identity
+    if len(model.model.layers) == 0:
+        import torch.nn as nn
+        model.model.layers = nn.ModuleDict({"dummy": nn.Identity()})
+
     # Stage 0: keep embed_tokens, remove lm_head and final_norm
     if stage_idx == 0:
         model.lm_head = None
@@ -200,6 +164,47 @@ def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
         model.lm_head = None
 
     return model
+
+# def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
+#     """
+#     Partition LLaMA model for pipeline parallelism.
+#     - Initialize on 'meta' to avoid OOM
+#     - Keep only layers assigned to this stage
+#     - Remove unused components (embeddings, lm_head, etc.)
+#     """
+#     with torch.device("meta"):
+#         model = MyLlamaForCausalLM(config)
+#         if dist.is_initialized() and dist.get_rank() == 0:
+#             total_params = sum(p.numel() for p in model.parameters()) / 1e9
+#             print(f"[Rank 0] Model params: {total_params:.2f}B")
+
+#     num_layers = config.num_hidden_layers
+
+#     # Flexible layer assignment (supports non-divisible cases)
+#     layers_per_stage = num_layers // num_stages
+#     remainder = num_layers % num_stages
+#     start_layer = stage_idx * layers_per_stage + min(stage_idx, remainder)
+#     end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
+
+#     # Remove layers not assigned to this stage
+#     for i in list(model.model.layers.keys()):
+#         if not (start_layer <= int(i) < end_layer):
+#             del model.model.layers[i]
+
+#     # Stage 0: keep embed_tokens, remove lm_head and final_norm
+#     if stage_idx == 0:
+#         model.lm_head = None
+#         model.model.final_norm = None
+#     # Last stage: keep lm_head and final_norm, remove embed_tokens
+#     elif stage_idx == num_stages - 1:
+#         model.model.embed_tokens = None
+#     # Middle stages: remove all non-layer components
+#     else:
+#         model.model.embed_tokens = None
+#         model.model.final_norm = None
+#         model.lm_head = None
+
+#     return model
 
 def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
     # 初始化设备网格
