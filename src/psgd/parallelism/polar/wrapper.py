@@ -178,9 +178,6 @@ class PolarParallel:
         self.stage_model = stage_model
         self.stage_model.to_empty(device=self.device, recurse=True)
         self.stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-        self.stage.submod.register_forward_hook(
-            lambda mod, inp, out: print(f"[stage {self.stage.stage_index}] input shape: {[i.shape for i in inp if hasattr(i, 'shape')]}, output shape: {out.shape if hasattr(out, 'shape') else out}")
-        )
         
         self.stage = PipelineStage(
             self.stage_model,
@@ -188,6 +185,10 @@ class PolarParallel:
             num_stages=self.pp_mesh.size(),
             device=self.device,
             group=self.pp_mesh.get_group(),
+        )
+        
+        self.stage.submod.register_forward_hook(
+            lambda mod, inp, out: print(f"[stage {self.stage.stage_index}] input shape: {[i.shape for i in inp if hasattr(i, 'shape')]}, output shape: {out.shape if hasattr(out, 'shape') else out}")
         )
         
         self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
