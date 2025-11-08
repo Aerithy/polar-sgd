@@ -133,8 +133,10 @@ class LlamaDecoderLayer(nn.Module):
         sin: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ):
+        print(f"[LlamaDecoderLayer.forward] input shape: {x.shape}, dtype: {x.dtype}")
         x = x + self.attn(self.attn_norm(x), cos, sin, attention_mask)
         x = x + self.mlp(self.mlp_norm(x))
+        print(f"[LlamaDecoderLayer.forward] output shape: {x.shape}, dtype: {x.dtype}")
         return x
 
 
@@ -162,6 +164,8 @@ class LlamaModel(nn.Module):
         input_ids_or_hidden: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ):
+        print(f"[LlamaModel.forward] input shape: {input_ids_or_hidden.shape}, dtype: {input_ids_or_hidden.dtype}")
+        
         if self.embed_tokens is not None:
             # Stage 0: input is token IDs
             assert input_ids_or_hidden.dim() == 2
@@ -178,11 +182,14 @@ class LlamaModel(nn.Module):
         layer_keys = sorted(int(k) for k in self.layers.keys())
         for layer_id in layer_keys:
             layer = self.layers[str(layer_id)]
+            print(f"[LlamaModel] before layer {layer_id}: shape={hidden_states.shape}, dtype={hidden_states.dtype}")
             hidden_states = layer(hidden_states, cos, sin, attention_mask)
+            print(f"[LlamaModel] after layer {layer_id}: shape={hidden_states.shape}, dtype={hidden_states.dtype}")
 
         if self.final_norm is not None:
             hidden_states = self.final_norm(hidden_states)
 
+        print(f"[LlamaModel.forward] output shape: {hidden_states.shape}, dtype: {hidden_states.dtype}")
         return hidden_states
 
 

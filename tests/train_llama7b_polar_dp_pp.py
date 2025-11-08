@@ -163,6 +163,9 @@ def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
         model.model.final_norm = None
         model.lm_head = None
 
+    assigned_layers = [int(i) for i in model.model.layers.keys()]
+    print(f"[partition] Stage {stage_idx}: assigned layers {assigned_layers}")
+    
     return model
 
 # def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
