@@ -141,14 +141,14 @@ def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
     end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
 
     # Remove layers not assigned to this stage
-    for i in list(model.model.layers.keys()):
+    for i in list(model.model.transformers.keys()):
         if not (start_layer <= int(i) < end_layer):
-            del model.model.layers[i]
+            del model.model.transformers[i]
 
     # 如果当前 stage 没有分到任何 layer，补一个 nn.Identity
-    if len(model.model.layers) == 0:
+    if len(model.model.transformers) == 0:
         import torch.nn as nn
-        model.model.layers = nn.ModuleDict({"dummy": nn.Identity()})
+        model.model.transformers = nn.ModuleDict({"dummy": nn.Identity()})
 
     # Stage 0: keep embed_tokens, remove lm_head and final_norm
     if stage_idx == 0:
@@ -163,7 +163,7 @@ def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
         model.model.final_norm = None
         model.lm_head = None
 
-    assigned_layers = [int(i) for i in model.model.layers.keys()]
+    assigned_layers = [int(i) for i in model.model.transformers.keys()]
     print(f"[partition] Stage {stage_idx}: assigned layers {assigned_layers}")
     
     return model

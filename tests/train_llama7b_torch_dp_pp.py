@@ -138,9 +138,9 @@ def partition_llama_model(config, stage_idx, num_stages):
     # model.model.layers = torch.nn.ModuleDict(layers_dict)
 
     # 删除不属于当前 stage 的层
-    for i in list(model.model.layers.keys()):
+    for i in list(model.model.transformers.keys()):
         if not (start_layer <= int(i) < end_layer):
-            del model.model.layers[i]
+            del model.model.transformers[i]
 
     # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
     if stage_idx == 0:

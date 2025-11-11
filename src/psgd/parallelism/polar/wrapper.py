@@ -264,6 +264,65 @@ class PolarParallel:
                     avg_train_loss = loss # / len(self.train_dataloader)
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
     
+    def train_test(self):
+        self.stage.submod.register_full_backward_hook(GpipeHook(
+            device_mesh=self.device_mesh,
+            model=self.stage.submod,
+            grads=self.gradients,
+            grads_pred=self.grads_pred,
+            errors=self.errors,
+            micro_batch_size=self.micro_batches,
+        ))
+        self.stage.submod.register_forward_hook(
+            lambda mod, inp, out: print_io_shape_hook(mod, inp, out, f"stage:{self.stage.stage_index}")
+        )
+        global_step = 0
+        if self.stage.is_last:
+            pbar = tqdm(self.dataloader)
+        else:
+            pbar = self.dataloader
+            
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            profile_memory=True,
+            record_shapes=True,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
+            with_stack=True,
+        ) as prof:
+            for batch_idx, batch in enumerate(pbar):
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                attention_mask = batch["attention_mask"].to(self.device)
+                output = None
+
+                if self.optimizer:
+                    self.optimizer.zero_grad()
+
+                if self.stage.is_first:
+                    output = self.schedule.step(input_ids)
+                elif self.stage.is_last:
+                    losses = []
+                    self.schedule.step(target=labels, losses=losses)  # target 传给 last stage 的 forward
+                    loss = torch.stack(losses).mean()
+                    
+                    pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                    if global_step % 100 == 0:
+                        print(f"Step {global_step}, Loss: {loss.item():.4f}")
+                else:
+                    self.schedule.step()
+                        
+                self.optimizer.step()
+                global_step += 1
+                prof.step()
+                
+                if self.stage.is_last:
+                    avg_train_loss = loss # / len(self.train_dataloader)
+                    self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
+    
     def _train(self):
         global_step = 0
         if self.stage.is_last:
