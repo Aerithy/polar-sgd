@@ -147,7 +147,7 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.transformers = nn.ModuleDict({
+        self.layers = nn.ModuleDict({
             str(i): LlamaDecoderLayer(config) for i in range(config.num_hidden_layers)
         })
         self.final_norm = RMSNorm(config.hidden_size)
@@ -176,9 +176,9 @@ class LlamaModel(nn.Module):
             assert input_ids_or_hidden.dim() == 3
             hidden_states = input_ids_or_hidden
 
-        layer_keys = sorted(int(k) for k in self.transformers.keys())
+        layer_keys = sorted(int(k) for k in self.layers.keys())
         for layer_id in layer_keys:
-            layer = self.transformers[str(layer_id)]
+            layer = self.layers[str(layer_id)]
             print(f"[LlamaModel] before layer {layer_id}: shape={hidden_states.shape}, dtype={hidden_states.dtype}")
             hidden_states = layer(hidden_states, attention_mask)
             print(f"[LlamaModel] after layer {layer_id}: shape={hidden_states.shape}, dtype={hidden_states.dtype}")
