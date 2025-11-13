@@ -206,7 +206,7 @@ class MyLlamaForCausalLM(nn.Module):
         self,
         input_ids_or_hidden: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        # labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden = self.model(input_ids_or_hidden, attention_mask)
         if self.lm_head is not None:

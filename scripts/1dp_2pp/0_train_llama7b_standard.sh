@@ -1,7 +1,7 @@
 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=bond0 \
 torchrun --nproc_per_node=2                         \
 tests/train_llama7b_polar_dp_pp.py                  \
---pp_size=2                                         \
+--pp_size 2                                         \
 --epochs 1                                          \
 --batch_size 16                                     \
 --seq_length 512                                    \
