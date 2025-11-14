@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
-from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe, PipelineStage
+from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe, PipelineStage, Schedule1F1B
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -197,7 +197,8 @@ class PolarParallel:
         
         self.dataloader = dataloader
         
-        self.schedule = ScheduleGPipe(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
+        # self.schedule = ScheduleGPipe(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
+        self.schedule = Schedule1F1B(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
         
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
