@@ -247,7 +247,7 @@ def main():
     parser.add_argument("--micro_batches", type=int, default=1)
     args = parser.parse_args()
 
-    dist.init_process_group(backend="gloo", init_method="env://")
+    dist.init_process_group(backend="nccl", init_method="env://")
     world_size = dist.get_world_size()
     
     pp_size = args.pp_size
