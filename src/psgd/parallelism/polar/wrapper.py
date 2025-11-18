@@ -32,7 +32,7 @@ from psgd.utils.buffer import TensorBuffer
 from typing import List, Tuple
 
 from .util import get_partitions_and_pipe
-from .hooks import PolarCommHook, GpipeHook, print_io_shape_hook
+from .hooks import PolarCommHook, GpipeHook
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
