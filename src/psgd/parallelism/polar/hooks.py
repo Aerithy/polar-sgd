@@ -35,15 +35,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def print_io_shape_hook(module, input, output, name):
-    print(f"Stage: {name}")
-    print(f"  Input shape: {[inp.shape for inp in input]}")
-    if isinstance(output, torch.Tensor):
-        print(f"  Output shape: {output.shape}")
-    else:
-        print(f"  Output shape: {[out.shape for out in output]}")
-    print("-" * 40)
-
 class GpipeHook:
     """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
     """
@@ -82,7 +73,7 @@ class GpipeHook:
         
         trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
         logger.debug(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
-        print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
+        # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         
         if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
@@ -98,7 +89,7 @@ class GpipeHook:
             ) = self.flatten_tensor_list(self.grads_pred)
             self.flattened_grad_pred = self.flattened_grad_pred.to(device)
             self.flattened_grad_pred.requires_grad_(True)
-            print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter} running all reduce")
+            # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter} running all reduce")
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
@@ -122,7 +113,7 @@ class GpipeHook:
             
             self.micro_batch_counter = 0
         
-        print(f"[Rank {dist.get_rank()}] hook finished, MB{self.micro_batch_counter}")
+        # print(f"[Rank {dist.get_rank()}] hook finished, MB{self.micro_batch_counter}")
             
     def flatten_nested_tensor_list(
         self,

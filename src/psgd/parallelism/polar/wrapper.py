@@ -187,10 +187,6 @@ class PolarParallel:
             group=self.pp_mesh.get_group(),
         )
         
-        self.stage.submod.register_forward_hook(
-            lambda mod, inp, out: print(f"[stage {self.stage.stage_index}] input shape: {[i.shape for i in inp if hasattr(i, 'shape')]}, output shape: {out.shape if hasattr(out, 'shape') else out}")
-        )
-        
         self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
         
         dp_rank = self.dp_mesh.get_local_rank()
@@ -215,9 +211,7 @@ class PolarParallel:
             errors=self.errors,
             micro_batch_size=self.micro_batches,
         ))
-        self.stage.submod.register_forward_hook(
-            lambda mod, inp, out: print_io_shape_hook(mod, inp, out, f"stage:{self.stage.stage_index}")
-        )
+        
         global_step = 0
         if self.stage.is_last:
             pbar = tqdm(self.dataloader)
@@ -274,9 +268,6 @@ class PolarParallel:
             errors=self.errors,
             micro_batch_size=self.micro_batches,
         ))
-        self.stage.submod.register_forward_hook(
-            lambda mod, inp, out: print_io_shape_hook(mod, inp, out, f"stage:{self.stage.stage_index}")
-        )
         global_step = 0
         if self.stage.is_last:
             pbar = tqdm(self.dataloader)
