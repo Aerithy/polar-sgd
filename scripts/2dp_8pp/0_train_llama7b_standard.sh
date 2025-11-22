@@ -7,7 +7,7 @@ tests/train_llama7b_polar_dp_pp.py                  \
 --seq_length 512                                    \
 --lr 1e-4                                           \
 --dataset wikitext                                  \
---dataset_config wikitext-2-raw-v1                  \
+--dataset_config wikitext-103-raw-v1                \
 --tokenizer hf-internal-testing/llama-tokenizer     \
 --output_dir ./checkpoints                          \
 --micro_batches 32                                  \

@@ -1,3 +1,4 @@
+from ast import mod
 from psgd.parallelism.polar.wrapper import PolarParallel
 
 from gettext import dpgettext
@@ -60,6 +61,7 @@ class TokenizedDataset(Dataset):
         }
 
 def get_dataloader(
+    pp_size: int,
     dataset_name: str = "wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     tokenizer_name: str = "meta-llama/Llama-2-7b-hf",  # 或使用 "hf-internal-testing/llama-tokenizer" 如果无权限
@@ -95,13 +97,13 @@ def get_dataloader(
 
     # Distributed sampler
     sampler = None
-    # if dist.is_initialized():
-    #     sampler = torch.utils.data.distributed.DistributedSampler(
-    #         tokenized_dataset,
-    #         num_replicas=dist.get_world_size(),
-    #         rank=dist.get_rank(),
-    #         shuffle=True
-    #     )
+    if dist.is_initialized():
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            tokenized_dataset,
+            num_replicas=dist.get_world_size() // pp_size,
+            rank=dist.get_rank() // pp_size,
+            shuffle=True
+        )
 
     dataloader = DataLoader(
         tokenized_dataset,
@@ -117,47 +119,115 @@ def get_dataloader(
 # -----------------------------
 # Manual Model Partitioning (Option 1)
 # -----------------------------
-def partition_llama_model(config, stage_idx, num_stages):
+def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
     """
-    Manually partition LLaMA model for pipeline parallelism.
+    Partition LLaMA model for pipeline parallelism.
     - Initialize on 'meta' to avoid OOM
     - Keep only layers assigned to this stage
     - Remove unused components (embeddings, lm_head, etc.)
     """
     with torch.device("meta"):
         model = MyLlamaForCausalLM(config)
-        print(f"Model params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
+        if dist.is_initialized() and dist.get_rank() == 0:
+            total_params = sum(p.numel() for p in model.parameters()) / 1e9
+            print(f"[Rank 0] Model params: {total_params:.2f}B")
 
     num_layers = config.num_hidden_layers
-    assert num_layers % num_stages == 0, "num_layers must be divisible by num_stages"
+
+    # Flexible layer assignment (supports non-divisible cases)
     layers_per_stage = num_layers // num_stages
+    remainder = num_layers % num_stages
+    start_layer = stage_idx * layers_per_stage + min(stage_idx, remainder)
+    end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
 
-    start_layer = stage_idx * layers_per_stage
-    end_layer = (stage_idx + 1) * layers_per_stage
-
-    # 转换 layers 为 ModuleDict（保留 FQN）
-    # layers_dict = {str(i): model.model.layers[i] for i in range(num_layers)}
-    # model.model.layers = torch.nn.ModuleDict(layers_dict)
-
-    # 删除不属于当前 stage 的层
+    # Remove layers not assigned to this stage
     for i in list(model.model.layers.keys()):
         if not (start_layer <= int(i) < end_layer):
             del model.model.layers[i]
 
-    # Stage 0: 保留 embed_tokens，移除 lm_head 和 final_norm
+    # 如果当前 stage 没有分到任何 layer，补一个 nn.Identity
+    if len(model.model.layers) == 0:
+        import torch.nn as nn
+        model.model.layers = nn.ModuleDict({"dummy": nn.Identity()})
+
+    # Stage 0: keep embed_tokens, remove lm_head and final_norm
     if stage_idx == 0:
         model.lm_head = None
         model.model.final_norm = None
-    # Last stage: 保留 lm_head 和 final_norm，移除 embed_tokens
+    # Last stage: keep lm_head and final_norm, remove embed_tokens
     elif stage_idx == num_stages - 1:
         model.model.embed_tokens = None
-    # 中间 stage: 移除所有非 layer 组件
+    # Middle stages: remove all non-layer components
     else:
         model.model.embed_tokens = None
         model.model.final_norm = None
         model.lm_head = None
 
+    assigned_layers = [int(i) for i in model.model.layers.keys()]
+    print(f"[partition] Stage {stage_idx}: assigned layers {assigned_layers}")
+    
     return model
+
+# def partition_llama_model(config: LlamaConfig, stage_idx: int, num_stages: int):
+#     """
+#     Partition LLaMA model for pipeline parallelism.
+#     - Initialize on 'meta' to avoid OOM
+#     - Keep only layers assigned to this stage
+#     - Remove unused components (embeddings, lm_head, etc.)
+#     """
+#     with torch.device("meta"):
+#         model = MyLlamaForCausalLM(config)
+#         if dist.is_initialized() and dist.get_rank() == 0:
+#             total_params = sum(p.numel() for p in model.parameters()) / 1e9
+#             print(f"[Rank 0] Model params: {total_params:.2f}B")
+
+#     num_layers = config.num_hidden_layers
+
+#     # Flexible layer assignment (supports non-divisible cases)
+#     layers_per_stage = num_layers // num_stages
+#     remainder = num_layers % num_stages
+#     start_layer = stage_idx * layers_per_stage + min(stage_idx, remainder)
+#     end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
+
+#     # Remove layers not assigned to this stage
+#     for i in list(model.model.layers.keys()):
+#         if not (start_layer <= int(i) < end_layer):
+#             del model.model.layers[i]
+
+#     # Stage 0: keep embed_tokens, remove lm_head and final_norm
+#     if stage_idx == 0:
+#         model.lm_head = None
+#         model.model.final_norm = None
+#     # Last stage: keep lm_head and final_norm, remove embed_tokens
+#     elif stage_idx == num_stages - 1:
+#         model.model.embed_tokens = None
+#     # Middle stages: remove all non-layer components
+#     else:
+#         model.model.embed_tokens = None
+#         model.model.final_norm = None
+#         model.lm_head = None
+
+#     return model
+
+def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
+    # 初始化设备网格
+    # 使用 (DP_SIZE, PP_SIZE) 但确保 PP 在同一机器内
+    pp_mesh = device_mesh["pp"]
+    
+    # 验证 PP 组是否在同一机器
+    pp_group = pp_mesh.get_group()
+    pp_ranks = dist.get_process_group_ranks(pp_group)
+    
+    # 获取所有 PP 组进程的主机名
+    hostnames = []
+    for rank in pp_ranks:
+        if rank == dist.get_rank():
+            hostnames.append(os.uname().nodename)
+        else:
+            hostnames.append(None)
+    
+    if dist.get_rank() in pp_ranks:
+        print(f"PP Group {pp_ranks}: Hostnames {hostnames}")
 
 # -----------------------------
 # Main Training Loop
@@ -177,7 +247,7 @@ def main():
     parser.add_argument("--micro_batches", type=int, default=1)
     args = parser.parse_args()
 
-    dist.init_process_group(backend="gloo")
+    dist.init_process_group(backend="nccl", init_method="env://")
     world_size = dist.get_world_size()
     
     pp_size = args.pp_size
@@ -187,6 +257,8 @@ def main():
     device_mesh = init_device_mesh("cuda", (dp_size, pp_size), mesh_dim_names=("dp", "pp"))
     dp_mesh = device_mesh["dp"]
     pp_mesh = device_mesh["pp"]
+    
+    check_pp_group_status(device_mesh=device_mesh)
 
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{local_rank}")
@@ -195,8 +267,8 @@ def main():
     config = LlamaConfig(
         vocab_size=32000,
         hidden_size=4096,
-        intermediate_size=4096,
-        num_hidden_layers=16,
+        intermediate_size=11008,
+        num_hidden_layers=32,
         num_attention_heads=32,
         rope_theta=10000.0,
         pad_token_id=0,
@@ -205,11 +277,15 @@ def main():
 
     # ✅ 手动分区
     stage_idx = pp_mesh.get_local_rank()
+    # stage_idx = pp_mesh.get_coordinate()
+    print(f"Stage index: {stage_idx} / {pp_size}")
     # stage_idx = pp_mesh.get_rank()
     stage_model = partition_llama_model(config, stage_idx, pp_size)
     
     dp_rank = dp_mesh.get_local_rank()
+    print(f"DP rank: {dp_rank} / {dp_size}")
     dataloader, tokenizer = get_dataloader(
+        pp_size=pp_size,
         dataset_name=args.dataset,
         dataset_config=args.dataset_config,
         tokenizer_name=args.tokenizer,
@@ -218,18 +294,18 @@ def main():
         use_auth_token=args.use_auth_token,
         split="train"
     )
-    sampler = DistributedSampler(
-        dataloader.dataset,
-        num_replicas=dp_size,
-        rank=dp_rank,
-        shuffle=True,
-    )
-    dataloader = DataLoader(
-        dataloader.dataset,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        pin_memory=False,
-    )
+    # sampler = DistributedSampler(
+    #     dataloader.dataset,
+    #     num_replicas=dp_size,
+    #     rank=dp_rank,
+    #     shuffle=True,
+    # )
+    # dataloader = DataLoader(
+    #     dataloader.dataset,
+    #     batch_size=args.batch_size,
+    #     # sampler=sampler,
+    #     pin_memory=False,
+    # )
     
     def loss_fn(output, target):
         shift_logits = output[..., :-1, :].contiguous()

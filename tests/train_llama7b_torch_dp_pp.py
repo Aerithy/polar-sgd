@@ -21,16 +21,17 @@ from psgd.models.llama.llama_nn import LlamaConfig, MyLlamaForCausalLM  # e.g., 
 # Dataset
 # -----------------------------
 class TokenizedDataset(Dataset):
-    def __init__(self, dataset, tokenizer, seq_length=2048):
+    def __init__(self, dataset, tokenizer, seq_length=2048, text_field="text"):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.seq_length = seq_length
+        self.text_field = text_field
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        text = self.dataset[idx]["text"]
+        text = self.dataset[idx][self.text_field]
         tokens = self.tokenizer(
             text,
             truncation=True,
@@ -87,10 +88,18 @@ def get_dataloader(
         tokenizer.pad_token = tokenizer.eos_token
 
     # Load dataset
-    dataset = load_dataset(dataset_name, dataset_config, split=split)
+    if dataset_name == "c4":
+        # C4 dataset requires special handling
+        if dataset_config is None:
+            dataset_config = "en"  # Default to English
+        dataset = load_dataset("allenai/c4", dataset_config, split=split, streaming=False)
+        text_field = "text"
+    else:
+        dataset = load_dataset(dataset_name, dataset_config, split=split)
+        text_field = "text"
 
     # Tokenize
-    tokenized_dataset = TokenizedDataset(dataset, tokenizer, seq_length=seq_length)
+    tokenized_dataset = TokenizedDataset(dataset, tokenizer, seq_length=seq_length, text_field=text_field)
 
     # Distributed sampler
     # sampler = None
@@ -192,8 +201,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--seq_length", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--dataset", type=str, default="wikitext")
-    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1")
+    parser.add_argument("--dataset", type=str, default="wikitext", help="Dataset name: wikitext, c4, etc.")
+    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1", help="Dataset config: wikitext-2-raw-v1, wikitext-103-raw-v1, en (for c4), etc.")
     parser.add_argument("--tokenizer", type=str, default="hf-internal-testing/llama-tokenizer")
     parser.add_argument("--use_auth_token", action="store_true")
     parser.add_argument("--output_dir", type=str, default="./llama7b_checkpoints")

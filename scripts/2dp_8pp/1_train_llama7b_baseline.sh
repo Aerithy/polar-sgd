@@ -1,6 +1,6 @@
 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=bond0 \
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=10.48.95.29 --master_port=11234 \
-tests/train_llama7b_polar_dp_pp.py                  \
+tests/train_llama7b_polar_dp_pp_baseline.py         \
 --pp_size 8                                         \
 --epochs 1                                          \
 --batch_size 32                                     \
