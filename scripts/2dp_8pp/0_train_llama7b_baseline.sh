@@ -3,7 +3,7 @@ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=10.48.95.29 -
 tests/train_llama7b_polar_dp_pp_baseline.py         \
 --pp_size 8                                         \
 --epochs 1                                          \
---batch_size 32                                     \
+--batch_size 128                                     \
 --seq_length 512                                    \
 --lr 1e-4                                           \
 --dataset wikitext                                  \
