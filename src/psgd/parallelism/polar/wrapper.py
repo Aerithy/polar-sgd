@@ -226,7 +226,7 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}"),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
