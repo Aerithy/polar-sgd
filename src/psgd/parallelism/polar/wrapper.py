@@ -171,7 +171,7 @@ class PolarParallel:
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
-        self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}")
+        self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}")
         
         stage_idx = self.pp_mesh.get_local_rank()
         self.stage_idx = stage_idx
