@@ -71,7 +71,8 @@ class GpipeHook:
             if param.grad is not None:
                 self.grads[i] = param.grad
         
-        trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
+        # trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
+        trigger_condition = self.micro_batch_counter == self.pp_local_rank
         logger.debug(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         
