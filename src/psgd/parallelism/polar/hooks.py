@@ -69,7 +69,10 @@ class GpipeHook:
         device = next(self.model.parameters()).device
         for i, param in enumerate(self.model.parameters()):
             if param.grad is not None:
-                self.grads[i] = param.grad
+                # ✅ 累积梯度而不是直接赋值
+                if self.grads[i] is None:
+                    self.grads[i] = torch.zeros_like(param.grad)
+                self.grads[i].add_(param.grad)
         
         # trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
         # trigger_condition = self.micro_batch_counter == self.pp_local_rank
@@ -114,6 +117,8 @@ class GpipeHook:
             for param, grad_pred in zip(self.model.parameters(), self.grads_pred):
                 param.grad = grad_pred.clone()
             
+            # ✅ 清零累积的梯度，为下一个周期做准备
+            self.grads = [None for _ in self.grads]
             self.micro_batch_counter = 0
         
         # print(f"[Rank {dist.get_rank()}] hook finished, MB{self.micro_batch_counter}")
