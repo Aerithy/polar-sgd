@@ -1,39 +1,14 @@
-import os
-import datetime
-import argparse
 import logging
-import numpy as np
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
-from transformers import (
-    AutoTokenizer,
-    AutoConfig,
-    AutoModelForSequenceClassification,
-    BertModel,
-    get_linear_schedule_with_warmup,
-)
-import transformers
-from transformers.models.bert.modeling_bert import (
-    BertLayer,
-    BertEmbeddings,
-    BertPooler,
-    BertEncoder,
-)
-from datasets import load_dataset, load_from_disk
-from tqdm import tqdm
-from psgd.utils.buffer import TensorBuffer
 from typing import List, Optional, Tuple
-
-from .util import get_partitions_and_pipe
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 
 class GpipeHook:
     """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
@@ -76,13 +51,15 @@ class GpipeHook:
         
         # trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
         # trigger_condition = self.micro_batch_counter == self.pp_local_rank
-        trigger_condition = (self.micro_batch_counter - self.micro_batch_size / 2) == self.pp_local_rank
+        trigger_batch = self.pp_local_rank + self.micro_batch_size / 2
+        trigger_condition = self.micro_batch_counter == trigger_batch
         logger.debug(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
         
         # if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
         if trigger_condition:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
+            # scale = 1.0
             self.grads_pred = [
                 g * scale + e if e is not None and g is not None else torch.zeros(p.shape, device=device)
                 for g, e, p in zip(self.grads, self.errors, self.model.parameters())
@@ -95,10 +72,11 @@ class GpipeHook:
             ) = self.flatten_tensor_list(self.grads_pred)
             self.flattened_grad_pred = self.flattened_grad_pred.to(device)
             self.flattened_grad_pred.requires_grad_(True)
-            # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter} running all reduce")
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
+            for e in self.errors:
+                e.zero_()
         
         self.micro_batch_counter += 1
         

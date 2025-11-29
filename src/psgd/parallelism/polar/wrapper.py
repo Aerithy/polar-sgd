@@ -2,30 +2,39 @@ import os
 import datetime
 import argparse
 import logging
-from turtle import back
+# from turtle import back
 import numpy as np
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
+# from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
-from torch.distributed.pipelining import SplitPoint, pipeline, ScheduleGPipe, PipelineStage, Schedule1F1B
+from torch.distributed.device_mesh import (
+    # init_device_mesh, 
+    DeviceMesh
+)
+from torch.distributed.pipelining import (
+    SplitPoint,
+    pipeline,
+    ScheduleGPipe,
+    PipelineStage,
+    Schedule1F1B
+)
 from transformers import (
-    AutoTokenizer,
+    # AutoTokenizer,
     AutoConfig,
     AutoModelForSequenceClassification,
-    BertModel,
-    get_linear_schedule_with_warmup,
+    # BertModel,
+    # get_linear_schedule_with_warmup,
 )
 import transformers
-from transformers.models.bert.modeling_bert import (
-    BertLayer,
-    BertEmbeddings,
-    BertPooler,
-    BertEncoder,
-)
+from transformers.models.bert.modeling_bert import # (
+    # BertLayer,
+    # BertEmbeddings,
+    # BertPooler,
+    # BertEncoder,
+# )
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from psgd.utils.buffer import TensorBuffer
@@ -187,6 +196,15 @@ class PolarParallel:
             group=self.pp_mesh.get_group(),
         )
         
+        # ✅ 使用 DDP 包装模型用于 baseline (_train)
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        self.ddp_model = DDP(
+            self.stage.submod,
+            process_group=self.dp_mesh.get_group(),
+            gradient_as_bucket_view=True,
+            broadcast_buffers=False,  # Pipeline 不需要同步 buffer
+        )
+        
         self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
         
         dp_rank = self.dp_mesh.get_local_rank()
@@ -316,8 +334,34 @@ class PolarParallel:
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
     
     def _train(self):
+        """Baseline training with DDP (no gradient prediction)"""
+        # ✅ 临时使用 DDP 模型进行训练
+        ddp_stage = PipelineStage(
+            self.ddp_model,
+            stage_index=self.stage_idx,
+            num_stages=self.pp_mesh.size(),
+            device=self.device,
+            group=self.pp_mesh.get_group(),
+        )
+        
+        # ✅ 重新创建 optimizer，使用 DDP 模型的参数
+        optimizer = torch.optim.AdamW(self.ddp_model.parameters(), lr=1e-4)
+        
+        # ✅ 创建 schedule（使用 DDP stage）
+        def loss_fn(output, target):
+            import torch.nn.functional as F
+            shift_logits = output[..., :-1, :].contiguous()
+            shift_labels = target[..., 1:].contiguous()
+            return F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=0,
+            )
+        
+        schedule = ScheduleGPipe(ddp_stage, n_microbatches=self.micro_batches, loss_fn=loss_fn)
+        
         global_step = 0
-        if self.stage.is_last:
+        if ddp_stage.is_last:
             pbar = tqdm(self.dataloader)
         else:
             pbar = self.dataloader
@@ -335,39 +379,31 @@ class PolarParallel:
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(self.device)
-                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                labels = batch["labels"].to(self.device) if ddp_stage.is_last else None
                 attention_mask = batch["attention_mask"].to(self.device)
 
-                if self.optimizer:
-                    self.optimizer.zero_grad()
+                optimizer.zero_grad()
 
-                if self.stage.is_first:
-                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
-                elif self.stage.is_last:
+                if ddp_stage.is_first:
+                    output = schedule.step(input_ids, attention_mask=attention_mask)
+                elif ddp_stage.is_last:
                     losses = []
-                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                    schedule.step(target=labels, losses=losses, attention_mask=attention_mask)
                     loss = torch.stack(losses).mean()
                     
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
-                    self.schedule.step(attention_mask=attention_mask)
-                        
-                self.optimizer.step()
+                    schedule.step(attention_mask=attention_mask)
+                
+                # ✅ DDP 会自动在 backward 后 all_reduce 梯度，无需手动操作
+                optimizer.step()
                 global_step += 1
                 
-                if self.stage.is_last:
-                    avg_train_loss = loss # / len(self.train_dataloader)
+                if ddp_stage.is_last:
+                    avg_train_loss = loss
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
-                
-                grads = []
-                for param in self.stage.submod.parameters():
-                    if param.requires_grad:
-                        grads.append(param.grad)
-
-                if grads:
-                    dist.all_reduce_coalesced(grads, op=dist.ReduceOp.AVG, group=self.dp_mesh.get_group())
                 
                 prof.step()
 
