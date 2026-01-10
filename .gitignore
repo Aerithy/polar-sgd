@@ -2,6 +2,8 @@
 *.tar.gz
 *.safetensors
 *.pt.trace.json
+*.bkp
+.DS_Store
 events.out.tfevents.*
 !README.md
 

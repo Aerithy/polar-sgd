@@ -1,0 +1,183 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/28.0.6 Chrome/138.0.7204.100 Electron/37.2.3 Safari/537.36" version="28.0.6">
+  <diagram name="POLAR-SGD Architecture" id="polar-sgd-arch">
+    <mxGraphModel dx="1234" dy="855" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1600" math="1" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="training-loop" value="🔄 Training Loop" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#f0f8ff;strokeColor=#0066cc;strokeWidth=4;fontSize=16;fontStyle=1;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry x="170" y="80" width="850" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="pipeline-scheduler" value="⚙️ Pipeline Scheduler" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#e6f3ff;strokeColor=#0066cc;strokeWidth=2;fontSize=14;fontStyle=1;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry x="220" y="120" width="760" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="forward-pass" value="&lt;b&gt;Forward Pass&lt;/b&gt;&lt;br&gt;前向传播&lt;br&gt;🔵 计算损失" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3d9ff;strokeColor=#0066cc;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="250" y="160" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="backward-pass" value="&lt;b&gt;Backward Pass&lt;/b&gt;&lt;br&gt;后向传播&lt;br&gt;🔵 计算梯度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3d9ff;strokeColor=#0066cc;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="440" y="160" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="optimizer-step" value="&lt;b&gt;Optimizer Step&lt;/b&gt;&lt;br&gt;优化器步骤&lt;br&gt;🟢 更新参数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3e6b3;strokeColor=#00cc00;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="620" y="160" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="next-batch" value="&lt;b&gt;Next Batch&lt;/b&gt;&lt;br&gt;下一批次&lt;br&gt;🟡 加载数据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6b3;strokeColor=#ff9900;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="810" y="160" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-fp-bp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#0066cc;endArrow=block;endFill=1;" parent="1" source="forward-pass" target="backward-pass" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-bp-os" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#0066cc;endArrow=block;endFill=1;" parent="1" source="backward-pass" target="optimizer-step" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-os-nb" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#0066cc;endArrow=block;endFill=1;" parent="1" source="optimizer-step" target="next-batch" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ddp-wrapper" value="🎯 POLAR-SGD DDP Wrapper" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#fff9f0;strokeColor=#ff9900;strokeWidth=4;fontSize=16;fontStyle=1;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry x="170" y="300" width="850" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="gradient-hook" value="📌 Gradient Hook Manager" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#ffe6cc;strokeColor=#ff9900;strokeWidth=2;fontSize=14;fontStyle=1;arcSize=5;labelBackgroundColor=none;" parent="1" vertex="1">
+          <mxGeometry x="200" y="340" width="780" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="mb-counter" value="&lt;b&gt;Micro-batch Counter&lt;/b&gt;&lt;br&gt;批次计数器&lt;br&gt;📊 track:  m = 1,2,3..." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd699;strokeColor=#ff9900;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="250" y="380" width="290" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="comm-handle" value="&lt;b&gt;Communication Handle List&lt;/b&gt;&lt;br&gt;通信句柄列表&lt;br&gt;🔗 管理异步操作" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd699;strokeColor=#ff9900;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="620" y="380" width="330" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-counter-handle" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#ff9900;endArrow=block;endFill=1;dashed=1;" parent="1" source="mb-counter" target="comm-handle" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label-counter-handle" value="更新计数" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;labelBackgroundColor=light-dark(#fde4cb, #ededed);fontStyle=1" parent="arrow-counter-handle" vertex="1" connectable="0">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="async-comm" value="🌐 Asynchronous Communication Manager" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#e6ffe6;strokeColor=#00cc00;strokeWidth=2;fontSize=14;fontStyle=1;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry x="200" y="500" width="780" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="grad-buffer" value="&lt;b&gt;Gradient Buffer&lt;/b&gt;&lt;br&gt;梯度缓冲区&lt;br&gt;\(g_a\)&lt;br&gt;🔶 累积的原始梯度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ccffcc;strokeColor=#00cc00;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="250" y="530" width="290" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="pred-grad-buffer" value="&lt;b&gt;Predicted Gradient Buffer&lt;/b&gt;&lt;br&gt;预测梯度缓冲区&lt;br&gt;\(g_{pred}\)&lt;br&gt;🔷 预测的同步梯度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ccffcc;strokeColor=#00cc00;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="620" y="530" width="330" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-grad-pred" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#00cc00;endArrow=block;endFill=1;" parent="1" source="grad-buffer" target="pred-grad-buffer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label-grad-pred" value="预测处理" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;fontStyle=1;labelBackgroundColor=light-dark(#e4fde4, #ededed);" parent="arrow-grad-pred" vertex="1" connectable="0">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="error-feedback" value="🎯 Error Feedback Module" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fillColor=#ffe6f0;strokeColor=#cc0066;strokeWidth=2;fontSize=14;fontStyle=1;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry x="200" y="660" width="780" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="error-buffer" value="&lt;b&gt;Error Buffer&lt;/b&gt;&lt;br&gt;误差缓冲区&lt;br&gt;\(e\)&lt;br&gt;🔴 \(e_t = {g_a}_t - {g_{pred}}_t\)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcccc;strokeColor=#cc0000;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="250" y="690" width="160" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="compensate" value="&lt;b&gt;Compensate&lt;/b&gt;&lt;br&gt;误差补偿&lt;br&gt;\(g_{compensated}\)&lt;br&gt;🟣 \(= g_{pred} + e_{prev}\)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6ccff;strokeColor=#9933cc;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="490" y="690" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="send-buffer" value="&lt;b&gt;Send Buffer&lt;/b&gt;&lt;br&gt;发送缓冲区&lt;br&gt;\(s\)&lt;br&gt;📤 待发送的补偿梯度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cce5ff;strokeColor=#0066cc;strokeWidth=2;fontSize=13;arcSize=10;" parent="1" vertex="1">
+          <mxGeometry x="750" y="690" width="200" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="arrow-error-comp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#9933cc;endArrow=block;endFill=1;" parent="1" source="error-buffer" target="compensate" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label-error-comp" value="添加误差" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;fontStyle=1;labelBackgroundColor=light-dark(#fde4ee, #ededed);" parent="arrow-error-comp" vertex="1" connectable="0">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-comp-send" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#0066cc;endArrow=block;endFill=1;" parent="1" source="compensate" target="send-buffer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label-comp-send" value="准备发送" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;fontStyle=1;labelBackgroundColor=light-dark(#fde4ee, #ededed);" parent="arrow-comp-send" vertex="1" connectable="0">
+          <mxGeometry x="-0.1" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-bp-hook" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=4;strokeColor=#0066cc;endArrow=block;endFill=1;" parent="1" source="backward-pass" target="gradient-hook" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="480" y="280" />
+              <mxPoint x="350" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-bp-hook" value="① hook gradient" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=14;fontStyle=1;backgroundColor=#ffffff;" parent="arrow-bp-hook" vertex="1" connectable="0">
+          <mxGeometry x="-0.2" y="2" relative="1" as="geometry">
+            <mxPoint x="-32" y="-2" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-wrapper-opt" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=4;strokeColor=#00cc00;endArrow=block;endFill=1;" parent="1" source="ddp-wrapper" target="optimizer-step" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="900" y="280" />
+              <mxPoint x="670" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-wrapper-opt" value="② update parameters" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=14;fontStyle=1;backgroundColor=#ffffff;" parent="arrow-wrapper-opt" vertex="1" connectable="0">
+          <mxGeometry x="-0.7" y="2" relative="1" as="geometry">
+            <mxPoint x="-100" y="-2" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-grad-error" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#cc0000;endArrow=block;endFill=1;dashed=1;" parent="1" source="grad-buffer" target="error-buffer" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="270" y="620" />
+              <mxPoint x="270" y="770" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-grad-error" value="触发反馈" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;labelBackgroundColor=light-dark(#fdf7ee, #ededed);" parent="arrow-grad-error" vertex="1" connectable="0">
+          <mxGeometry x="-0.3" y="1" relative="1" as="geometry">
+            <mxPoint x="-1" y="9" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-pred-comp" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#9933cc;endArrow=block;endFill=1;dashed=1;" parent="1" source="pred-grad-buffer" target="compensate" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="830" y="630" />
+              <mxPoint x="580" y="630" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-pred-comp" value="用于补偿" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=12;labelBackgroundColor=light-dark(#fcf6ed, #ededed);" parent="arrow-pred-comp" vertex="1" connectable="0">
+          <mxGeometry x="0.2" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-send-handle" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=3;strokeColor=#ff9900;endArrow=block;endFill=1;" parent="1" source="send-buffer" target="comm-handle" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="970" y="750" />
+              <mxPoint x="970" y="410" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-send-handle" value="④ 异步 All-Reduce" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=13;fontStyle=1;backgroundColor=#ffffff;" parent="arrow-send-handle" vertex="1" connectable="0">
+          <mxGeometry x="0.5" y="2" relative="1" as="geometry">
+            <mxPoint x="-28" y="-5" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow-handle-error" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#cc0000;endArrow=block;endFill=1;dashed=1;entryX=0.006;entryY=0.595;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" target="error-buffer" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="620" y="370" />
+              <mxPoint x="230" y="370" />
+              <mxPoint x="230" y="744" />
+            </Array>
+            <mxPoint x="620" y="390" as="sourcePoint" />
+            <mxPoint x="130" y="750" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="label-handle-error" value="⑤ 完成回调" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontSize=13;fontStyle=1;backgroundColor=#ffffff;" parent="arrow-handle-error" vertex="1" connectable="0">
+          <mxGeometry x="0.3" y="2" relative="1" as="geometry">
+            <mxPoint x="-2" y="-3" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
