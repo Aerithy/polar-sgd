@@ -66,32 +66,43 @@ class GpipeHook:
         if trigger_condition:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
             # scale = 1.0
-            self.grads_pred = [
-                g * scale + e if e is not None and g is not None else torch.zeros(p.shape, device=device)
-                for g, e, p in zip(self.grads, self.errors, self.model.parameters())
-            ]
+            grads_pred = []
+            for g, e, p in zip(self.grads, self.errors, self.model.parameters()):
+                if g is None:
+                    grads_pred.append(None)
+                    continue
+                if e is None:
+                    e = torch.zeros_like(g)
+                grads_pred.append(g * scale + e)
+            self.grads_pred = grads_pred
             (
                 self.flattened_grad_pred,
                 self.is_none_mask,
                 self.tensor_numels,
                 self.original_shapes,
             ) = self.flatten_tensor_list(self.grads_pred)
-            self.flattened_grad_pred = self.flattened_grad_pred.to(device)
-            self.flattened_grad_pred.requires_grad_(True)
+            if self.flattened_grad_pred.device != device:
+                self.flattened_grad_pred = self.flattened_grad_pred.to(device)
+                
             self.comm_handle = dist.all_reduce(
                 self.flattened_grad_pred, group=self.dp_group, async_op=True
             )
-            for e in self.errors:
-                e.zero_()
+            
+            for i, e in enumerate(self.errors):
+                if e is not None:
+                    e.zero_()
         
         self.micro_batch_counter += 1
         
         if self.micro_batch_counter == self.micro_batch_size:
             self.comm_handle.wait()
-            self.errors = [
-                g - p if p is not None and g is not None else torch.zeros(param.shape, device=device)
-                for g, p, param in zip(self.grads, self.grads_pred, self.model.parameters())
-            ]
+            new_errors = []
+            for g, p in zip(self.grads, self.grads_pred):
+                if g is None or p is None:
+                    new_errors.append(None)
+                else:
+                    new_errors.append(g - p)
+            self.errors = new_errors
             self.grads_pred = self.unflatten_tensor_list(
                 self.flattened_grad_pred,
                 self.is_none_mask,
@@ -99,7 +110,10 @@ class GpipeHook:
                 self.original_shapes,
             )
             for param, grad_pred in zip(self.model.parameters(), self.grads_pred):
-                param.grad = grad_pred.clone()
+                if grad_pred is None:
+                    param.grad = None
+                else:
+                    param.grad = grad_pred.detach().clone()
             
             # ✅ 清零累积的梯度，为下一个周期做准备
             self.grads = [None for _ in self.grads]
