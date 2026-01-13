@@ -29,12 +29,6 @@ from transformers import (
     # get_linear_schedule_with_warmup,
 )
 import transformers
-from transformers.models.bert.modeling_bert import # (
-    # BertLayer,
-    # BertEmbeddings,
-    # BertPooler,
-    # BertEncoder,
-# )
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from psgd.utils.buffer import TensorBuffer
@@ -151,15 +145,18 @@ class NativePolarGradientCollector:
             self.comm_hook_handle.remove()
             self.comm_hook_handle = None
 
+
 class PolarParallel:
     def __init__(
         self,
         args: argparse.Namespace,
         device_mesh: DeviceMesh,
-        micro_batches: int, # you may call it the local step size
-        stage_model, 
+        micro_batches: int,     # you may call it the local step size
+        stage_model,
         loss_fn,
-        dataloader: DataLoader, 
+        dataloader: DataLoader,
+        comm_timing: int,
+        optimizer="adamw",
     ):
         """__init__: initialize the PolarParallel
         
@@ -176,18 +173,28 @@ class PolarParallel:
         self.dp_mesh = self.device_mesh["dp"]
         self.pp_mesh = self.device_mesh["pp"]
         self.micro_batches = micro_batches
-        
+
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
-        self.writer = SummaryWriter(log_dir=f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/tb_scalars")
-        
+        log_dir = (
+            f"./log/{self.args.using_polar}"
+            f"{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+            f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
+            f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
+        )
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.tensorboard_trace_dir = log_dir.replace("tb_scalars", "tb_trace")
+
         stage_idx = self.pp_mesh.get_local_rank()
         self.stage_idx = stage_idx
         self.stage_model = stage_model
         self.stage_model.to_empty(device=self.device, recurse=True)
-        self.stage_model.apply(lambda m: m.reset_parameters() if hasattr(m, 'reset_parameters') else None)
-        
+        self.stage_model.apply(
+            lambda m: m.reset_parameters()
+            if hasattr(m, 'reset_parameters') else None
+        )
+
         self.stage = PipelineStage(
             self.stage_model,
             stage_index=stage_idx,
@@ -195,7 +202,7 @@ class PolarParallel:
             device=self.device,
             group=self.pp_mesh.get_group(),
         )
-        
+
         # ✅ 使用 DDP 包装模型用于 baseline (_train)
         from torch.nn.parallel import DistributedDataParallel as DDP
         self.ddp_model = DDP(
@@ -204,22 +211,31 @@ class PolarParallel:
             gradient_as_bucket_view=True,
             broadcast_buffers=False,  # Pipeline 不需要同步 buffer
         )
-        
-        self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
-        
-        dp_rank = self.dp_mesh.get_local_rank()
-        
+
+        self.optimizer = None
+        self.optimizer_name = optimizer
+        if optimizer == "adamw":
+            self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
+        elif optimizer == "sgd":
+            self.optimizer = torch.optim.SGD(self.stage.submod.parameters(), lr=1e-3)
+
+        # dp_rank = self.dp_mesh.get_local_rank()
+
         self.dataloader = dataloader
-        
-        # self.schedule = ScheduleGPipe(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
-        self.schedule = Schedule1F1B(self.stage, n_microbatches=micro_batches, loss_fn=loss_fn)
-        
+        self.comm_timing = comm_timing
+
+        self.schedule = Schedule1F1B(
+            self.stage,
+            n_microbatches=micro_batches,
+            loss_fn=loss_fn
+        )
+
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
-        
+
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
-        
+
     def train(self):
         self.stage.submod.register_full_backward_hook(GpipeHook(
             device_mesh=self.device_mesh,
@@ -228,6 +244,7 @@ class PolarParallel:
             grads_pred=self.grads_pred,
             errors=self.errors,
             micro_batch_size=self.micro_batches,
+            comm_timing=self.comm_timing,
         ))
         
         global_step = 0
@@ -244,7 +261,8 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}"),
+            # on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
@@ -300,7 +318,8 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
+            # on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
@@ -345,7 +364,10 @@ class PolarParallel:
         )
         
         # ✅ 重新创建 optimizer，使用 DDP 模型的参数
-        optimizer = torch.optim.AdamW(self.ddp_model.parameters(), lr=1e-4)
+        if self.optimizer_name == "sgd":
+            optimizer = torch.optim.SGD(self.ddp_model.parameters(), lr=1e-3)
+        elif self.optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(self.ddp_model.parameters(), lr=1e-4)
         
         # ✅ 创建 schedule（使用 DDP stage）
         def loss_fn(output, target):
@@ -407,6 +429,7 @@ class PolarParallel:
                 
                 prof.step()
 
+
 class PolarDataParallel:
     def __init__(
         self,
@@ -421,12 +444,18 @@ class PolarDataParallel:
     ):
         '''
         Args:
-            args (argparse.Namespace): Command line arguments containing training configurations.
-            inter_group (torch.distributed.ProcessGroup): Process group for inter-node communication.
-            local_group (torch.distributed.ProcessGroup): Process group for intra-node communication.
-            model (torch.nn.Module, optional): Predefined model. If None, a model will be created based on args. Defaults to None.
-            device (torch.device, optional): Device to run the model on. If None, it will be set based on availability of CUDA. Defaults to None.
-            tokenizer (transformers.PreTrainedTokenizer, optional): Predefined tokenizer. If None, a tokenizer will be created based on args. Defaults to None.
+            args (argparse.Namespace):
+                Command line arguments containing training configurations.
+            inter_group (torch.distributed.ProcessGroup):
+                Process group for inter-node communication.
+            local_group (torch.distributed.ProcessGroup):
+                Process group for intra-node communication.
+            model (torch.nn.Module, optional): Predefined model.
+                If None, a model will be created based on args.
+            device (torch.device, optional): Device to run the model on.
+                If None, it will be set based on availability of CUDA.
+            tokenizer (transformers.PreTrainedTokenizer): Predefined tokenizer.
+                If None, a tokenizer will be created based on args.
         '''
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)

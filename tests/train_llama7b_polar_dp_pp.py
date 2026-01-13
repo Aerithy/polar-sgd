@@ -238,6 +238,7 @@ def check_pp_group_status(device_mesh: dist.device_mesh.DeviceMesh):
     if dist.get_rank() in pp_ranks:
         print(f"PP Group {pp_ranks}: Hostnames {hostnames}")
 
+
 # -----------------------------
 # Main Training Loop
 # -----------------------------
@@ -247,13 +248,25 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--seq_length", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--dataset", type=str, default="wikitext", help="Dataset name: wikitext, c4, etc.")
-    parser.add_argument("--dataset_config", type=str, default="wikitext-2-raw-v1", help="Dataset config: wikitext-2-raw-v1, wikitext-103-raw-v1, en (for c4), etc.")
-    parser.add_argument("--tokenizer", type=str, default="hf-internal-testing/llama-tokenizer")
+    parser.add_argument("--dataset",
+                        type=str, default="wikitext",
+                        help="Dataset name: wikitext, c4, etc.")
+    parser.add_argument("--dataset_config", type=str,
+                        default="wikitext-2-raw-v1",
+                        help="""
+                        Dataset config: wikitext-2-raw-v1, 
+                        wikitext-103-raw-v1, en (for c4), etc.
+                        """)
+    parser.add_argument("--tokenizer", type=str,
+                        default="hf-internal-testing/llama-tokenizer")
     parser.add_argument("--use_auth_token", action="store_true")
-    parser.add_argument("--output_dir", type=str, default="./llama7b_checkpoints")
+    parser.add_argument("--output_dir", type=str,
+                        default="./llama7b_checkpoints")
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--micro_batches", type=int, default=1)
+    parser.add_argument("--comm_timing", type=int, default=-1)
+    parser.add_argument("--using_polar", type=bool, default=True)
+    
     args = parser.parse_args()
 
     dist.init_process_group(backend="nccl", init_method="env://")
@@ -332,10 +345,11 @@ def main():
         loss_fn=loss_fn,
         stage_model=stage_model,
         dataloader=dataloader,
+        comm_timing=args.comm_timing,
     )
-    
+
     trainer.train()
+
 
 if __name__ == "__main__":
     main()
-    

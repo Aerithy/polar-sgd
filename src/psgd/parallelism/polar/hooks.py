@@ -21,6 +21,7 @@ class GpipeHook:
         grads_pred: List[torch.Tensor],
         errors: List[torch.Tensor],
         micro_batch_size: int,
+        comm_timing: int,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -39,6 +40,7 @@ class GpipeHook:
         self.micro_batch_size = micro_batch_size
         self.offset = 0
         self.comm_handle = None
+        self.comm_timing = comm_timing
 
     def __call__(self, *args, **kwds):
         device = next(self.model.parameters()).device
@@ -49,14 +51,18 @@ class GpipeHook:
                     self.grads[i] = torch.zeros_like(param.grad)
                 self.grads[i].add_(param.grad)
         
-        # trigger_condition = self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1
+        # trigger_condition = self.micro_batch_counter == (self.pp_local_rank 
+        # + 1) * (self.micro_batch_size / self.pp_size) - 1
         # trigger_condition = self.micro_batch_counter == self.pp_local_rank
-        trigger_batch = self.pp_local_rank + self.micro_batch_size / 2
-        trigger_condition = self.micro_batch_counter == trigger_batch
-        logger.debug(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
-        # print(f"[Rank {dist.get_rank()}] PP{self.pp_local_rank} MB{self.micro_batch_counter}: trigger={trigger_condition}")
-        
-        # if self.micro_batch_counter == (self.pp_local_rank + 1) * (self.micro_batch_size / self.pp_size) - 1:
+        if self.comm_timing == -1:
+            trigger_batch = self.pp_local_rank + self.micro_batch_size / 2
+            trigger_condition = self.micro_batch_counter == trigger_batch
+            logger.debug(f"""[Rank {dist.get_rank()}] 
+                         PP{self.pp_local_rank} MB{self.micro_batch_counter}: 
+                         trigger={trigger_condition}""")
+        else:
+            trigger_batch = self.comm_timing
+            trigger_condition = self.micro_batch_counter == trigger_batch
         if trigger_condition:
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
             # scale = 1.0
