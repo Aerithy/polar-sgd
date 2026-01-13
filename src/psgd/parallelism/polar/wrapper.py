@@ -174,6 +174,7 @@ class PolarParallel:
         self.dp_mesh = self.device_mesh["dp"]
         self.pp_mesh = self.device_mesh["pp"]
         self.micro_batches = micro_batches
+        self.comm_timing = comm_timing
 
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
@@ -223,7 +224,6 @@ class PolarParallel:
         # dp_rank = self.dp_mesh.get_local_rank()
 
         self.dataloader = dataloader
-        self.comm_timing = comm_timing
 
         self.schedule = Schedule1F1B(
             self.stage,
