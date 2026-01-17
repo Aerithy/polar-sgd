@@ -89,8 +89,8 @@ def make_pp_dp_groups_dp_centered(
 
     Assumptions:
       - global ranks are node-contiguous: node_id = rank // local_world_size
-      - DP group is per-node (size=local_world_size)
-      - PP group is within each DP group, also per-node (size=local_world_size)
+      - PP group is per-node (ranks [0-7], [8-15], ...)
+      - DP group is cross-node at same local_rank (ranks [0,8,16,...], [1,9,17,...], ...)
 
     Returns:
       dp_group, pp_group, dp_size, pp_size, dp_rank, pp_rank
@@ -103,12 +103,13 @@ def make_pp_dp_groups_dp_centered(
     node_id = rank // local_world_size
     local_rank = rank % local_world_size
 
-    # DP group: one per node
-    dp_ranks = list(range(node_id * local_world_size, (node_id + 1) * local_world_size))
-    dp_group = dist.new_group(ranks=dp_ranks)
+    # PP group: all ranks within same node (e.g., [0-7] for node0, [8-15] for node1)
+    pp_ranks = list(range(node_id * local_world_size, (node_id + 1) * local_world_size))
+    pp_group = dist.new_group(ranks=pp_ranks)
 
-    # PP group: exactly the same ranks (pipeline inside node)
-    pp_group = dist.new_group(ranks=dp_ranks)
+    # DP group: all ranks with same local_rank across nodes (e.g., [0,8,16,...] for local_rank=0)
+    dp_ranks = [local_rank + i * local_world_size for i in range(nnodes)]
+    dp_group = dist.new_group(ranks=dp_ranks)
 
     dp_rank = node_id
     pp_rank = local_rank
