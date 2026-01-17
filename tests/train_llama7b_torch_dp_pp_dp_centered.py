@@ -95,7 +95,10 @@ def make_pp_dp_groups_dp_centered(
     Returns:
       dp_group, pp_group, dp_size, pp_size, dp_rank, pp_rank
     """
-    assert world_size == nnodes * local_world_size
+    assert world_size == nnodes * local_world_size, (
+        f"world_size ({world_size}) must equal nnodes ({nnodes}) "
+        f"* local_world_size ({local_world_size})"
+    )
     pp_size = local_world_size
     dp_size = nnodes
 
@@ -109,10 +112,19 @@ def make_pp_dp_groups_dp_centered(
 
     # DP group: all ranks with same local_rank across nodes (e.g., [0,8,16,...] for local_rank=0)
     dp_ranks = [local_rank + i * local_world_size for i in range(nnodes)]
+    # Ensure all ranks exist before creating group
+    assert all(r < world_size for r in dp_ranks), (
+        f"Invalid dp_ranks {dp_ranks} for world_size {world_size}"
+    )
     dp_group = dist.new_group(ranks=dp_ranks)
 
     dp_rank = node_id
     pp_rank = local_rank
+    
+    # Debug: print group membership on rank 0 of each PP group
+    if local_rank == 0:
+        print(f"[Rank {rank}] Node {node_id}: PP group={pp_ranks}, DP group={dp_ranks}")
+    
     return dp_group, pp_group, dp_size, pp_size, dp_rank, pp_rank
 
 
