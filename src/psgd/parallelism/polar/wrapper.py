@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 # from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributed.device_mesh import (
-    # init_device_mesh, 
+    # init_device_mesh,
     DeviceMesh
 )
 from torch.distributed.pipelining import (
@@ -29,10 +29,10 @@ from transformers import (
     # get_linear_schedule_with_warmup,
 )
 import transformers
-from datasets import load_dataset, load_from_disk
+# from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
-from psgd.utils.buffer import TensorBuffer
-from typing import List, Tuple
+# from psgd.utils.buffer import TensorBuffer
+from typing import List  # Tuple
 
 from .util import get_partitions_and_pipe
 from .hooks import PolarCommHook, GpipeHook
@@ -51,15 +51,19 @@ class NativePolarGradientCollector:
     """
 
     def __init__(
-        self, inter_group, local_group, partitions: List[List[torch.nn.Module]], num_chunks: int
+        self, inter_group, local_group,
+        partitions: List[List[torch.nn.Module]], num_chunks: int
     ):
         """__init__
 
         Args:
-            inter_group (_type_): Distributed group for inter-node communication
-            local_group (_type_): Distributed group for intra-node communication
-            partition (_type_): Model partition to which this hook is attached. i.e. hook does not modify the model parameters either the gradients.
-            send_buffer (_type_): Send buffer for gradients, size of this buffer should be equal to the partition's size, everything received from all_reduce operation will be an in-place operation..
+            inter_group: Distributed group for inter-node communication
+            local_group: Distributed group for intra-node communication
+            partition: Model partition to which this hook is attached. i.e.
+                hook does not modify the model parameters either the gradients.
+            send_buffer: Send buffer for gradients, size of this buffer should
+                be equal to the partition's size, everything received from
+                all_reduce operation will be an in-place operation.
         """
         self.inter_group = inter_group
         self.local_group = local_group
@@ -89,20 +93,27 @@ class NativePolarGradientCollector:
             ]
             for partition in self.partitions
         ]
-        
+
         print("Partitions structure:", [type(p) for p in self.partitions])
         # 注入：分区统计与示例层类型
         try:
             sizes = [len(p) for p in self.partitions]
-            head_types = [[type(m).__name__ for m in p[:3]] for p in self.partitions]
-            total_params = [sum(p_.numel() for m in p for p_ in m.parameters()) for p in self.partitions]
-            logger.info(f"[collector:init] partitions_sizes={sizes}, partitions_total_params={total_params}, head_layer_types={head_types}")
+            head_types = [[
+                    type(m).__name__ for m in p[:3]
+                ] for p in self.partitions]
+            total_params = [sum(p_.numel() for m in p for p_ in m.parameters())
+                            for p in self.partitions]
+            logger.info(f"[collector:init] partitions_sizes={sizes}, "
+                        f"partitions_total_params={total_params}, "
+                        f"head_layer_types={head_types}")
             for idx, p in enumerate(self.partitions):
                 if len(p) == 0:
-                    logger.warning(f"[collector:init] EMPTY partition after reverse at idx={idx}. Check split points and stage assignment.")
+                    logger.warning(f"[collector:init] EMPTY partition after "
+                                   f"reverse at idx={idx}. Check split points "
+                                   f"and stage assignment.")
         except Exception as e:
-            logger.exception(f"[collector:init] partition introspection failed: {e}")
-        
+            logger.exception(f"[collector:init] partition "
+                             f"introspection failed: {e}")
 
     def register_hook(self):
         """Register hook to the first layer of the partition.
@@ -159,7 +170,7 @@ class PolarParallel:
         optimizer="adamw",
     ):
         """__init__: initialize the PolarParallel
-        
+
         Args:
             args (argparse.Namespace): args from user argparse
             dp_size (int): data parallel size
@@ -181,8 +192,8 @@ class PolarParallel:
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
         log_dir = (
             f"./log/{self.args.using_polar}"
-            f"{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
             f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
+            f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
             f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
         )
         self.writer = SummaryWriter(log_dir=log_dir)
@@ -247,13 +258,13 @@ class PolarParallel:
             micro_batch_size=self.micro_batches,
             comm_timing=self.comm_timing,
         ))
-        
+
         global_step = 0
         if self.stage.is_last:
             pbar = tqdm(self.dataloader)
         else:
             pbar = self.dataloader
-            
+
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -397,7 +408,14 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                (
+                    f"./log/False"
+                    f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
+                    f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+                    f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
+                )
+            ),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
