@@ -15,7 +15,7 @@ NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 NODE_RANK=${NODE_RANK:-1}
 
 # Local-SGD configuration
-LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-10}  # Sync every N steps
+LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-8}  # Sync every N steps
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
