@@ -267,6 +267,19 @@ def main():
     parser.add_argument("--comm_timing", type=int, default=-1)
     parser.add_argument("--using_polar", type=bool, default=True)
     
+    # Local-SGD arguments
+    parser.add_argument(
+        "--use_local_sgd",
+        action="store_true",
+        help="Enable Local-SGD mode (sync parameters every N steps)"
+    )
+    parser.add_argument(
+        "--local_sgd_steps",
+        type=int,
+        default=10,
+        help="Synchronize parameters every N steps in Local-SGD mode"
+    )
+    
     args = parser.parse_args()
 
     dist.init_process_group(backend="nccl", init_method="env://")
@@ -346,6 +359,8 @@ def main():
         stage_model=stage_model,
         dataloader=dataloader,
         comm_timing=args.comm_timing,
+        use_local_sgd=args.use_local_sgd,
+        local_sgd_steps=args.local_sgd_steps,
     )
 
     trainer.train()

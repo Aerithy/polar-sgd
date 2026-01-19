@@ -168,16 +168,22 @@ class PolarParallel:
         dataloader: DataLoader,
         comm_timing: int,
         optimizer="adamw",
+        use_local_sgd: bool = False,
+        local_sgd_steps: int = 1,
     ):
         """__init__: initialize the PolarParallel
 
         Args:
             args (argparse.Namespace): args from user argparse
-            dp_size (int): data parallel size
-            pp_size (int): pipeline parallel size
+            device_mesh: DeviceMesh for DP and PP
             micro_batches (int): micro_batches for pipeline parallel
-            model_split_fn (_type_): manual model partition function
+            stage_model: partitioned model for this stage
+            loss_fn: loss function
             dataloader (DataLoader): training datasets
+            comm_timing (int): communication timing parameter
+            optimizer (str): optimizer type
+            use_local_sgd (bool): enable Local-SGD mode
+            local_sgd_steps (int): synchronize parameters every N steps
         """
         os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
         self.args = args
@@ -186,16 +192,29 @@ class PolarParallel:
         self.pp_mesh = self.device_mesh["pp"]
         self.micro_batches = micro_batches
         self.comm_timing = comm_timing
+        
+        # Local-SGD settings
+        self.use_local_sgd = use_local_sgd
+        self.local_sgd_steps = local_sgd_steps
+        self.local_step_counter = 0
 
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
         self.datetime = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')
-        log_dir = (
-            f"./log/{self.args.using_polar}"
-            f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
-            f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
-            f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
-        )
+        if self.use_local_sgd:
+            log_dir = (
+                f"./log/local_sgd"
+                f"/{self.args.dataset_config}/{optimizer}/{self.local_sgd_steps}"
+                f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+                f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
+            )
+        else:
+            log_dir = (
+                f"./log/{self.args.using_polar}"
+                f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
+                f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+                f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
+            )
         self.writer = SummaryWriter(log_dir=log_dir)
         self.tensorboard_trace_dir = log_dir.replace("tb_scalars", "tb_trace")
 
@@ -248,16 +267,36 @@ class PolarParallel:
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
 
+    def _sync_parameters_local_sgd(self):
+        """
+        Synchronize model parameters across DP group (for Local-SGD).
+        Average parameters across all DP replicas.
+        """
+        dp_group = self.dp_mesh.get_group()
+        dp_size = self.dp_mesh.size()
+        
+        logger.info(
+            f"[Rank {dist.get_rank()}] Local-SGD parameter sync at step {self.local_step_counter}"
+        )
+        
+        with torch.no_grad():
+            for param in self.stage.submod.parameters():
+                # All-reduce parameters (SUM) then average
+                dist.all_reduce(param.data, op=dist.ReduceOp.SUM, group=dp_group)
+                param.data.div_(dp_size)
+
     def train(self):
-        self.stage.submod.register_full_backward_hook(GpipeHook(
-            device_mesh=self.device_mesh,
-            model=self.stage.submod,
-            grads=self.gradients,
-            grads_pred=self.grads_pred,
-            errors=self.errors,
-            micro_batch_size=self.micro_batches,
-            comm_timing=self.comm_timing,
-        ))
+        # Register hook only if not using Local-SGD (Polar gradient prediction)
+        if not self.use_local_sgd:
+            self.stage.submod.register_full_backward_hook(GpipeHook(
+                device_mesh=self.device_mesh,
+                model=self.stage.submod,
+                grads=self.gradients,
+                grads_pred=self.grads_pred,
+                errors=self.errors,
+                micro_batch_size=self.micro_batches,
+                comm_timing=self.comm_timing,
+            ))
 
         global_step = 0
         if self.stage.is_last:
@@ -273,7 +312,6 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
-            # on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}/{self.dp_mesh.get_local_rank()}/{self.pp_mesh.get_local_rank()}"),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
             with_stack=True,
         ) as prof:
@@ -281,16 +319,15 @@ class PolarParallel:
                 input_ids = batch["input_ids"].to(self.device)
                 labels = batch["labels"].to(self.device) if self.stage.is_last else None
                 attention_mask = batch["attention_mask"].to(self.device)
-                output = None
 
                 if self.optimizer:
                     self.optimizer.zero_grad()
 
                 if self.stage.is_first:
-                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
+                    self.schedule.step(input_ids, attention_mask=attention_mask)
                 elif self.stage.is_last:
                     losses = []
-                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)  # target 传给 last stage 的 forward
+                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)
                     loss = torch.stack(losses).mean()
                     
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
@@ -300,11 +337,17 @@ class PolarParallel:
                     self.schedule.step(attention_mask=attention_mask)
                         
                 self.optimizer.step()
+                self.local_step_counter += 1
                 global_step += 1
+                
+                # Local-SGD: sync parameters every N steps
+                if self.use_local_sgd and (self.local_step_counter % self.local_sgd_steps == 0):
+                    self._sync_parameters_local_sgd()
+                
                 prof.step()
                 
                 if self.stage.is_last:
-                    avg_train_loss = loss # / len(self.train_dataloader)
+                    avg_train_loss = loss
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
     
     def train_test(self):
@@ -705,4 +748,3 @@ class PolarDataParallel:
                     print(f"Epoch {epoch+1} Average Loss: {avg_train_loss:.4f}")
                     
                 self.scheduler.step()
-    
