@@ -486,7 +486,7 @@ class PolarParallel:
                 ignore_index=0,
             )
 
-        schedule = ScheduleGPipe(
+        schedule = Schedule1F1B(
             baseline_stage,
             n_microbatches=self.micro_batches,
             loss_fn=loss_fn,
