@@ -438,7 +438,11 @@ class PolarParallel:
                     self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
     
     def _train(self):
-        """Baseline training with DDP (no gradient prediction)"""
+        """Baseline training (no gradient prediction).
+
+        - baseline_mode='manual': bare pipeline + manual DP grad all-reduce.
+        - baseline_mode='ddp': pipeline stage wrapped with DDP (may OOM).
+        """
         # ✅ 临时使用 DDP 模型进行训练
         ddp_stage = PipelineStage(
             self.ddp_model,
@@ -453,26 +457,13 @@ class PolarParallel:
             optimizer = torch.optim.SGD(self.ddp_model.parameters(), lr=1e-3)
         elif self.optimizer_name == "adamw":
             optimizer = torch.optim.AdamW(self.ddp_model.parameters(), lr=1e-4)
-        
-        # ✅ 创建 schedule（使用 DDP stage）
-        def loss_fn(output, target):
-            import torch.nn.functional as F
-            shift_logits = output[..., :-1, :].contiguous()
-            shift_labels = target[..., 1:].contiguous()
-            return F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=0,
-            )
-        
-        schedule = ScheduleGPipe(ddp_stage, n_microbatches=self.micro_batches, loss_fn=loss_fn)
-        
+
         global_step = 0
         if ddp_stage.is_last:
             pbar = tqdm(self.dataloader)
         else:
             pbar = self.dataloader
-            
+
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -499,18 +490,18 @@ class PolarParallel:
                 optimizer.zero_grad()
 
                 if ddp_stage.is_first:
-                    output = schedule.step(input_ids, attention_mask=attention_mask)
+                    output = self.schedule.step(input_ids, attention_mask=attention_mask)
                 elif ddp_stage.is_last:
                     losses = []
-                    schedule.step(target=labels, losses=losses, attention_mask=attention_mask)
+                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)
                     loss = torch.stack(losses).mean()
                     
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
-                    schedule.step(attention_mask=attention_mask)
-                
+                    self.schedule.step(attention_mask=attention_mask)
+
                 # ✅ DDP 会自动在 backward 后 all_reduce 梯度，无需手动操作
                 optimizer.step()
                 global_step += 1
