@@ -266,7 +266,19 @@ def main():
     parser.add_argument("--micro_batches", type=int, default=1)
     parser.add_argument("--comm_timing", type=int, default=-1)
     parser.add_argument("--using_polar", type=bool, default=True)
-    
+
+    parser.add_argument(
+        "--baseline_mode",
+        type=str,
+        default="manual",
+        choices=["manual", "ddp"],
+        help=(
+            "Baseline training mode for DP+PP: 'manual' does explicit DP "
+            "gradient all-reduce after backward; 'ddp' wraps each stage with "
+            "DDP (may OOM in pipeline scenarios)."
+        ),
+    )
+
     # Local-SGD arguments
     parser.add_argument(
         "--use_local_sgd",
@@ -361,6 +373,7 @@ def main():
         comm_timing=args.comm_timing,
         use_local_sgd=args.use_local_sgd,
         local_sgd_steps=args.local_sgd_steps,
+        baseline_mode=args.baseline_mode,
     )
 
     trainer._train()

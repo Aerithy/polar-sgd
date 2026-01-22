@@ -170,6 +170,7 @@ class PolarParallel:
         optimizer="adamw",
         use_local_sgd: bool = False,
         local_sgd_steps: int = 1,
+        baseline_mode: str = "manual",
     ):
         """__init__: initialize the PolarParallel
 
@@ -184,6 +185,8 @@ class PolarParallel:
             optimizer (str): optimizer type
             use_local_sgd (bool): enable Local-SGD mode
             local_sgd_steps (int): synchronize parameters every N steps
+            baseline_mode (str): baseline training mode: "manual" (manual DP grad all-reduce)
+                or "ddp" (wrap stage with DDP; may OOM with pipeline + large models).
         """
         os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
         self.args = args
@@ -192,7 +195,17 @@ class PolarParallel:
         self.pp_mesh = self.device_mesh["pp"]
         self.micro_batches = micro_batches
         self.comm_timing = comm_timing
-        
+
+        self.baseline_mode = (baseline_mode or "manual").lower()
+        if self.baseline_mode not in ("manual", "ddp"):
+            raise ValueError(f"Unsupported baseline_mode={baseline_mode!r}. Use 'manual' or 'ddp'.")
+        if self.baseline_mode == "ddp":
+            logger.warning(
+                "baseline_mode='ddp' wraps each pipeline stage with DDP. "
+                "This can increase memory usage and may OOM for large models/microbatches. "
+                "Prefer baseline_mode='manual' for a robust baseline."
+            )
+
         # Local-SGD settings
         self.use_local_sgd = use_local_sgd
         self.local_sgd_steps = local_sgd_steps
@@ -235,14 +248,16 @@ class PolarParallel:
             group=self.pp_mesh.get_group(),
         )
 
-        # ✅ 使用 DDP 包装模型用于 baseline (_train)
-        from torch.nn.parallel import DistributedDataParallel as DDP
-        self.ddp_model = DDP(
-            self.stage.submod,
-            process_group=self.dp_mesh.get_group(),
-            gradient_as_bucket_view=True,
-            broadcast_buffers=False,  # Pipeline 不需要同步 buffer
-        )
+        # Only construct DDP wrapper when explicitly requested.
+        self.ddp_model = None
+        if self.baseline_mode == "ddp":
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            self.ddp_model = DDP(
+                self.stage.submod,
+                process_group=self.dp_mesh.get_group(),
+                gradient_as_bucket_view=True,
+                broadcast_buffers=False,  # Pipeline does not require buffers sync
+            )
 
         self.optimizer = None
         self.optimizer_name = optimizer
@@ -284,6 +299,21 @@ class PolarParallel:
                 # All-reduce parameters (SUM) then average
                 dist.all_reduce(param.data, op=dist.ReduceOp.SUM, group=dp_group)
                 param.data.div_(dp_size)
+
+    def _allreduce_dp_grads_(self):
+        """All-reduce grads across the DP group (SUM then average).
+
+        Intended for baseline_mode='manual' (no DDP).
+        """
+        dp_group = self.dp_mesh.get_group()
+        dp_size = self.dp_mesh.size()
+        if dp_size == 1:
+            return
+        for p in self.stage.submod.parameters():
+            if p.grad is None:
+                continue
+            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM, group=dp_group)
+            p.grad.div_(dp_size)
 
     def train(self):
         # Register hook only if not using Local-SGD (Polar gradient prediction)
