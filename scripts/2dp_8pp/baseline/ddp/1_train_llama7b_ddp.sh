@@ -36,4 +36,5 @@ torchrun \
   --micro_batches 32 \
   --use_local_sgd \
   --local_sgd_steps ${LOCAL_SGD_STEPS} \
-  --baseline_mode manual
+  --baseline_mode manual \
+  --using_polar False
