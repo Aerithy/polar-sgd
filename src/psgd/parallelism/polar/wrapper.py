@@ -475,7 +475,7 @@ class PolarParallel:
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 (
                     f"./log/False"
-                    f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
+                    f"/{self.args.dataset_config}/{self.optimizer_name}/{self.comm_timing}"
                     f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
                     f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
                 )
