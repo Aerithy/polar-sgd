@@ -354,32 +354,39 @@ class PolarParallel:
                     self.optimizer.zero_grad()
 
                 if self.stage.is_first:
-                    self.schedule.step(input_ids, attention_mask=attention_mask)
+                    self.schedule.step(
+                        input_ids, attention_mask=attention_mask
+                    )
                 elif self.stage.is_last:
                     losses = []
-                    self.schedule.step(target=labels, losses=losses, attention_mask=attention_mask)
+                    self.schedule.step(
+                        target=labels, losses=losses,
+                        attention_mask=attention_mask
+                    )
                     loss = torch.stack(losses).mean()
-                    
+
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
                     self.schedule.step(attention_mask=attention_mask)
-                        
+
                 self.optimizer.step()
                 self.local_step_counter += 1
                 global_step += 1
-                
+
                 # Local-SGD: sync parameters every N steps
                 if self.use_local_sgd and (self.local_step_counter % self.local_sgd_steps == 0):
                     self._sync_parameters_local_sgd()
-                
+
                 prof.step()
-                
+
                 if self.stage.is_last:
                     avg_train_loss = loss
-                    self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
-    
+                    self.writer.add_scalar(
+                        'Loss/train', avg_train_loss, batch_idx
+                    )
+
     def train_test(self):
         self.stage.submod.register_full_backward_hook(GpipeHook(
             device_mesh=self.device_mesh,
@@ -402,41 +409,52 @@ class PolarParallel:
             ],
             profile_memory=True,
             record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            schedule=torch.profiler.schedule(wait=1, warmup=1, 
+                                             active=3, repeat=2),
             # on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                self.tensorboard_trace_dir
+            ),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(self.device)
-                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                if self.stage.is_last:
+                    labels = batch["labels"].to(self.device)
+                else:
+                    labels = None
                 attention_mask = batch["attention_mask"].to(self.device)
-                output = None
+                # output = None
 
                 if self.optimizer:
                     self.optimizer.zero_grad()
 
                 if self.stage.is_first:
-                    output = self.schedule.step(input_ids)
+                    self.schedule.step(input_ids)
                 elif self.stage.is_last:
                     losses = []
-                    self.schedule.step(target=labels, losses=losses)  # target 传给 last stage 的 forward
+                    # target 传给 last stage 的 forward
+                    self.schedule.step(target=labels, losses=losses)
                     loss = torch.stack(losses).mean()
-                    
+
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
                     self.schedule.step()
-                        
+
                 self.optimizer.step()
                 global_step += 1
                 prof.step()
-                
+
                 if self.stage.is_last:
-                    avg_train_loss = loss # / len(self.train_dataloader)
-                    self.writer.add_scalar('Loss/train', avg_train_loss, batch_idx)
-    
+                    avg_train_loss = loss  # / len(self.train_dataloader)
+                    self.writer.add_scalar(
+                        'Loss/train',
+                        avg_train_loss,
+                        batch_idx
+                    )
+
     def _train(self):
         """Baseline training (no gradient prediction).
 
@@ -493,7 +511,27 @@ class PolarParallel:
         )
 
         global_step = 0
-        pbar = tqdm(self.dataloader) if baseline_stage.is_last else self.dataloader
+        if baseline_stage.is_last:
+            pbar = tqdm(self.dataloader)
+        else:
+            pbar = self.dataloader
+
+        # Baseline logging layout: 
+        # ./log/baseline_{mode}/.../{dp_local_rank}/tb_{scalars,trace}
+        baseline_root = (
+            f"./log/baseline_{self.baseline_mode}"
+            f"/{self.args.dataset_config}"
+            f"/{self.optimizer_name}"
+            f"/{self.comm_timing}"
+            f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+            f"/{self.dp_mesh.get_local_rank()}"
+        )
+        baseline_scalar_dir = f"{baseline_root}/tb_scalars"
+        baseline_trace_dir = f"{baseline_root}/tb_trace"
+
+        baseline_writer = None
+        if baseline_stage.is_last:
+            baseline_writer = SummaryWriter(log_dir=baseline_scalar_dir)
 
         with torch.profiler.profile(
             activities=[
@@ -502,15 +540,10 @@ class PolarParallel:
             ],
             profile_memory=True,
             record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            schedule=torch.profiler.schedule(wait=1, warmup=1,
+                                             active=3, repeat=2),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                (
-                    f"./log/baseline_{self.baseline_mode}"
-                    f"/{self.args.dataset_config}/{self.optimizer_name}/{self.comm_timing}"
-                    f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
-                    f"/{self.dp_mesh.get_local_rank()}/tb_trace"
-                )
-            ),
+                baseline_trace_dir),
             with_stack=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
@@ -547,10 +580,15 @@ class PolarParallel:
                 optimizer.step()
                 global_step += 1
 
-                if baseline_stage.is_last:
-                    self.writer.add_scalar('Loss/train', loss, batch_idx)
+                if baseline_stage.is_last and baseline_writer is not None:
+                    baseline_writer.add_scalar('Loss/train', loss, batch_idx)
 
                 prof.step()
+
+        # Ensure scalars are flushed to disk.
+        if baseline_writer is not None:
+            baseline_writer.flush()
+            baseline_writer.close()
 
 
 class PolarDataParallel:
