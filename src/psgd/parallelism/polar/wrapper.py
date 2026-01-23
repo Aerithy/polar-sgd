@@ -344,6 +344,7 @@ class PolarParallel:
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
             with_stack=True,
+            acc_events=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(self.device)
@@ -416,6 +417,7 @@ class PolarParallel:
                 self.tensorboard_trace_dir
             ),
             with_stack=True,
+            acc_events=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(self.device)
@@ -545,6 +547,7 @@ class PolarParallel:
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 baseline_trace_dir),
             with_stack=True,
+            acc_events=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
                 input_ids = batch["input_ids"].to(self.device)
@@ -801,6 +804,7 @@ class PolarDataParallel:
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.args.using_hook}-{self.args.local_steps}"),
             with_stack=True,
+            acc_events=True,
         ) as prof:
             for epoch in range(self.args.epochs):
                 self.model.train()
