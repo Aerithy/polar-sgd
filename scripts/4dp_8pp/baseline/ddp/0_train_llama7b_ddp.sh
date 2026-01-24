@@ -37,6 +37,11 @@ if [[ "${USE_LOCAL_SGD}" == "1" ]]; then
   EXTRA_ARGS+=(--use_local_sgd --local_sgd_steps "${LOCAL_SGD_STEPS}")
 fi
 
+EXTRA_ARGS_EXPANDED=()
+if (( ${#EXTRA_ARGS[@]} > 0 )); then
+  EXTRA_ARGS_EXPANDED=("${EXTRA_ARGS[@]}")
+fi
+
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
   --nnodes=${NNODES} \
@@ -56,4 +61,4 @@ torchrun \
   --micro_batches ${MICRO_BATCHES} \
   --baseline_mode ${BASELINE_MODE} \
   --using_polar ${USING_POLAR} \
-  "${EXTRA_ARGS[@]}"
+  "${EXTRA_ARGS_EXPANDED[@]}"
