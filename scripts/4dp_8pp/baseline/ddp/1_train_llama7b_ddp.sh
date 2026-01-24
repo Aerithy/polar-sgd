@@ -31,33 +31,46 @@ USING_POLAR=${USING_POLAR:-False}
 USE_LOCAL_SGD=${USE_LOCAL_SGD:-0}        # 0/1
 LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-1}
 
-EXTRA_ARGS=()
 if [[ "${USE_LOCAL_SGD}" == "1" ]]; then
-  EXTRA_ARGS+=(--use_local_sgd --local_sgd_steps "${LOCAL_SGD_STEPS}")
+  torchrun \
+    --nproc_per_node=${NPROC_PER_NODE} \
+    --nnodes=${NNODES} \
+    --node_rank=${NODE_RANK} \
+    --master_addr=${MASTER_ADDR} \
+    --master_port=${MASTER_PORT} \
+    tests/train_llama7b_ddp_dp_pp.py \
+    --pp_size ${PP_SIZE} \
+    --epochs ${EPOCHS} \
+    --batch_size ${BATCH_SIZE} \
+    --seq_length ${SEQ_LENGTH} \
+    --lr ${LR} \
+    --dataset ${DATASET} \
+    --dataset_config ${DATASET_CONFIG} \
+    --tokenizer ${TOKENIZER} \
+    --output_dir ${OUTPUT_DIR} \
+    --micro_batches ${MICRO_BATCHES} \
+    --baseline_mode ${BASELINE_MODE} \
+    --using_polar ${USING_POLAR} \
+    --use_local_sgd \
+    --local_sgd_steps ${LOCAL_SGD_STEPS}
+else
+  torchrun \
+   --nproc_per_node=${NPROC_PER_NODE} \
+   --nnodes=${NNODES} \
+   --node_rank=${NODE_RANK} \
+   --master_addr=${MASTER_ADDR} \
+   --master_port=${MASTER_PORT} \
+   tests/train_llama7b_ddp_dp_pp.py \
+   --pp_size ${PP_SIZE} \
+   --epochs ${EPOCHS} \
+   --batch_size ${BATCH_SIZE} \
+   --seq_length ${SEQ_LENGTH} \
+   --lr ${LR} \
+   --dataset ${DATASET} \
+   --dataset_config ${DATASET_CONFIG} \
+   --tokenizer ${TOKENIZER} \
+   --output_dir ${OUTPUT_DIR} \
+   --micro_batches ${MICRO_BATCHES} \
+   --baseline_mode ${BASELINE_MODE} \
+   --using_polar ${USING_POLAR}
 fi
-
-EXTRA_ARGS_EXPANDED=()
-if (( ${#EXTRA_ARGS[@]} > 0 )); then
-  EXTRA_ARGS_EXPANDED=("${EXTRA_ARGS[@]}")
-fi
-
-torchrun \
-  --nproc_per_node=${NPROC_PER_NODE} \
-  --nnodes=${NNODES} \
-  --node_rank=${NODE_RANK} \
-  --master_addr=${MASTER_ADDR} \
-  --master_port=${MASTER_PORT} \
-  tests/train_llama7b_ddp_dp_pp.py \
-  --pp_size ${PP_SIZE} \
-  --epochs ${EPOCHS} \
-  --batch_size ${BATCH_SIZE} \
-  --seq_length ${SEQ_LENGTH} \
-  --lr ${LR} \
-  --dataset ${DATASET} \
-  --dataset_config ${DATASET_CONFIG} \
-  --tokenizer ${TOKENIZER} \
-  --output_dir ${OUTPUT_DIR} \
-  --micro_batches ${MICRO_BATCHES} \
-  --baseline_mode ${BASELINE_MODE} \
-  --using_polar ${USING_POLAR} \
-  "${EXTRA_ARGS_EXPANDED[@]}"
