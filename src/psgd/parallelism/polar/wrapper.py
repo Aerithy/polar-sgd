@@ -185,8 +185,9 @@ class PolarParallel:
             optimizer (str): optimizer type
             use_local_sgd (bool): enable Local-SGD mode
             local_sgd_steps (int): synchronize parameters every N steps
-            baseline_mode (str): baseline training mode: "manual" (manual DP grad all-reduce)
-                or "ddp" (wrap stage with DDP; may OOM with pipeline + large models).
+            baseline_mode (str): baseline training mode: "manual"
+                (manual DP grad all-reduce) or "ddp" (wrap stage with DDP;
+                may OOM with pipeline + large models).
         """
         os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
         self.args = args
@@ -198,11 +199,15 @@ class PolarParallel:
 
         self.baseline_mode = (baseline_mode or "manual").lower()
         if self.baseline_mode not in ("manual", "ddp"):
-            raise ValueError(f"Unsupported baseline_mode={baseline_mode!r}. Use 'manual' or 'ddp'.")
+            raise ValueError(
+                f"Unsupported baseline_mode={baseline_mode!r}. "
+                f"Use 'manual' or 'ddp'."
+            )
         if self.baseline_mode == "ddp":
             logger.warning(
                 "baseline_mode='ddp' wraps each pipeline stage with DDP. "
-                "This can increase memory usage and may OOM for large models/microbatches. "
+                "This can increase memory usage and may OOM "
+                "for large models/microbatches. "
                 "Prefer baseline_mode='manual' for a robust baseline."
             )
 
@@ -217,7 +222,8 @@ class PolarParallel:
         if self.use_local_sgd:
             log_dir = (
                 f"./log/local_sgd"
-                f"/{self.args.dataset_config}/{optimizer}/{self.local_sgd_steps}"
+                f"/{self.args.dataset_config}/{optimizer}"
+                f"/{self.local_sgd_steps}"
                 f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
                 f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
             )
@@ -256,15 +262,17 @@ class PolarParallel:
                 self.stage.submod,
                 process_group=self.dp_mesh.get_group(),
                 gradient_as_bucket_view=True,
-                broadcast_buffers=False,  # Pipeline does not require buffers sync
+                broadcast_buffers=False,  # Pipeline does not require sync
             )
 
         self.optimizer = None
         self.optimizer_name = optimizer
         if optimizer == "adamw":
-            self.optimizer = torch.optim.AdamW(self.stage.submod.parameters(), lr=1e-4)
+            self.optimizer = torch.optim.AdamW(
+                self.stage.submod.parameters(), lr=1e-4)
         elif optimizer == "sgd":
-            self.optimizer = torch.optim.SGD(self.stage.submod.parameters(), lr=1e-3)
+            self.optimizer = torch.optim.SGD(
+                self.stage.submod.parameters(), lr=1e-3)
 
         # dp_rank = self.dp_mesh.get_local_rank()
 
@@ -341,7 +349,7 @@ class PolarParallel:
             ],
             profile_memory=True,
             record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
             with_stack=True,
             acc_events=True,
@@ -411,7 +419,7 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1, 
-                                             active=3, repeat=2),
+                                             active=3, repeat=1),
             # on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 self.tensorboard_trace_dir
@@ -543,7 +551,7 @@ class PolarParallel:
             profile_memory=True,
             record_shapes=True,
             schedule=torch.profiler.schedule(wait=1, warmup=1,
-                                             active=3, repeat=2),
+                                             active=3, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 baseline_trace_dir),
             with_stack=True,
@@ -766,9 +774,9 @@ class PolarDataParallel:
         example_batch.pop("token_type_ids", None)  # We don't need to use token_type_ids while tracing
         example_args = (example_batch['input_ids'],)
         example_kwargs = {'attention_mask': example_batch['attention_mask']}
-        
+
         print(f'Tracing the model on rank {pp_rank} with example input on device {self.device}...')
-        
+
         # Create the Pipeline model
         pipeline_model = pipeline(
             self.model,
@@ -776,7 +784,7 @@ class PolarDataParallel:
             mb_kwargs=example_kwargs,
             split_spec=split_spec,
         )
-        
+
         assert pipeline_model is not None, "Pipeline model creation failed."
         print(f'Pipeline model created successfully on rank {pp_rank}. Current process holds stages: {pipeline_model.split_gm}')
         return pipeline_model
@@ -785,10 +793,10 @@ class PolarDataParallel:
         if not self.args.using_hook:
             self._train()
             return
-        
+
         pp_rank = dist.get_rank(group=self.local_group)
         last_pp_rank = dist.get_world_size(self.local_group) - 1
-        
+
         current_local_step = 0  # 当前本地步数计数器
         print(f"LOCAL_STEPS: {self.args.local_steps}")
         correct_predictions = 0
@@ -801,7 +809,7 @@ class PolarDataParallel:
             ],
             profile_memory=True,
             record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log/{self.datetime}-{self.args.using_hook}-{self.args.local_steps}"),
             with_stack=True,
             acc_events=True,
