@@ -1,14 +1,43 @@
-NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=bond0 \
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=10.48.95.29 --master_port=11234 \
-tests/train_llama7b_polar_dp_pp.py                  \
---pp_size 8                                         \
---epochs 1                                          \
---batch_size 128                                     \
---seq_length 512                                    \
---lr 1e-4                                           \
---dataset wikitext                                  \
---dataset_config wikitext-103-raw-v1                \
---tokenizer hf-internal-testing/llama-tokenizer     \
---output_dir ./checkpoints                          \
---micro_batches 32                                  \
---comm_timing 16                                    \
+#!/usr/bin/env bash
+set -euo pipefail
+
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
+
+MASTER_ADDR=${MASTER_ADDR:-10.82.123.23}
+MASTER_PORT=${MASTER_PORT:-11234}
+
+NNODES=${NNODES:-4}
+NPROC_PER_NODE=${NPROC_PER_NODE:-8}
+NODE_RANK=${NODE_RANK:-1}
+
+PP_SIZE=${PP_SIZE:-8}
+EPOCHS=${EPOCHS:-1}
+BATCH_SIZE=${BATCH_SIZE:-128}
+SEQ_LENGTH=${SEQ_LENGTH:-512}
+LR=${LR:-1e-4}
+DATASET=${DATASET:-wikitext}
+DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
+TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
+OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
+MICRO_BATCHES=${MICRO_BATCHES:-32}
+COMM_TIMING=${COMM_TIMING:-16}
+
+torchrun \
+  --nproc_per_node=${NPROC_PER_NODE} \
+  --nnodes=${NNODES} \
+  --node_rank=${NODE_RANK} \
+  --master_addr=${MASTER_ADDR} \
+  --master_port=${MASTER_PORT} \
+  tests/train_llama7b_polar_dp_pp.py \
+  --pp_size ${PP_SIZE} \
+  --epochs ${EPOCHS} \
+  --batch_size ${BATCH_SIZE} \
+  --seq_length ${SEQ_LENGTH} \
+  --lr ${LR} \
+  --dataset ${DATASET} \
+  --dataset_config ${DATASET_CONFIG} \
+  --tokenizer ${TOKENIZER} \
+  --output_dir ${OUTPUT_DIR} \
+  --micro_batches ${MICRO_BATCHES} \
+  --comm_timing ${COMM_TIMING}

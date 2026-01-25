@@ -55,10 +55,11 @@ class GpipeHook:
         # + 1) * (self.micro_batch_size / self.pp_size) - 1
         # trigger_condition = self.micro_batch_counter == self.pp_local_rank
         if self.comm_timing == -1:
-            trigger_batch = self.pp_local_rank + self.micro_batch_size / 2
+            # trigger_batch = self.pp_local_rank + self.micro_batch_size / 2
+            trigger_batch = self.micro_batch_size / 2
             trigger_condition = self.micro_batch_counter == trigger_batch
             logger.debug(f"""[Rank {dist.get_rank()}] 
-                         PP{self.pp_local_rank} MB{self.micro_batch_counter}: 
+                         PP{self.pp_local_rank} MB{self.micro_batch_counter}:
                          trigger={trigger_condition}""")
         else:
             trigger_batch = self.comm_timing
@@ -131,7 +132,7 @@ class GpipeHook:
         Returns:
             final_flattened (torch.Tensor): A single 1D tensor containing all elements from the nested list
             num_tensors_per_list (List[int]): Number of tensors in each sublist
-            tensor_sizes (List[int]): Number of elements in each tensor
+            tensor_sizes (List[int): Number of elements in each tensor
             original_shapes (List[List[tuple]]): Original shapes of each tensor in the nested list
         '''
         # 压平内层 List[torch.Tensor] 并记录结构 flatten each sublist of tensor (List[torch.Tensor]) and record structure of them
@@ -448,3 +449,183 @@ class PolarCommHook:
             restored_tensors.append(current_group)
 
         return restored_tensors
+
+class PolarGpipeIoOptimHook:
+    """POLAR gradient prediction hook with reduced IO/allocations.
+
+    This hook preserves the exact high-level logic of `GpipeHook`:
+      1) Accumulate true gradients across microbatches in `self.grads`.
+      2) At a trigger microbatch, form predicted grads: g * scale + e.
+      3) Flatten predicted grads and DP all-reduce them asynchronously.
+      4) At end of the step, wait, update error feedback e := g - p,
+         and replace param.grad with reduced predicted grads.
+
+    IO optimizations vs `GpipeHook`:
+      - Preallocate a single flat buffer (`self.flat_pred`) and reuse it.
+      - Avoid torch.cat/torch.split allocations each step.
+      - Avoid per-parameter `detach().clone()`: write into existing grad
+        tensors via `copy_`.
+
+    Notes:
+      - This hook is meant to be registered exactly like `GpipeHook`:
+        `module.register_full_backward_hook(PolarGpipeIoOptimHook(...))`
+      - It does not change math; it changes memory movement/allocation only.
+    """
+
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        grads: List[Optional[torch.Tensor]],
+        grads_pred: List[Optional[torch.Tensor]],
+        errors: List[Optional[torch.Tensor]],
+        micro_batch_size: int,
+        comm_timing: int,
+    ):
+        self.device_mesh = device_mesh
+        self.model = model
+
+        self.pp_mesh = device_mesh["pp"]
+        self.dp_mesh = device_mesh["dp"]
+        self.dp_group = self.dp_mesh.get_group()
+
+        self.pp_local_rank = self.device_mesh.get_local_rank("pp")
+        self.micro_batch_size = micro_batch_size
+        self.comm_timing = comm_timing
+
+        # External state lists (kept for compatibility with existing wrapper)
+        self.grads = grads
+        self.grads_pred = grads_pred
+        self.errors = errors
+
+        self.micro_batch_counter = 0
+        self.comm_handle: Optional[dist.Work] = None
+
+        # Build stable param list once
+        self.params: List[torch.nn.Parameter] = [
+            p for p in self.model.parameters()
+        ]
+
+        # Precompute flatten layout for non-None entries using param shapes.
+        # We assume the model parameter set is stable.
+        self.is_none_mask: List[bool] = []
+        self.tensor_numels: List[int] = []
+        self.original_shapes: List[torch.Size] = []
+        total_numel = 0
+        for p in self.params:
+            # By construction, grads_pred entries correspond 1:1 with params.
+            self.is_none_mask.append(False)
+            n = p.numel()
+            self.tensor_numels.append(n)
+            self.original_shapes.append(p.shape)
+            total_numel += int(n)
+
+        dev = next(self.model.parameters()).device
+        dtype = next(self.model.parameters()).dtype
+        # One reusable flat buffer for predicted grads
+        self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
+
+    def _trigger_condition(self) -> bool:
+        if self.comm_timing == -1:
+            trigger_batch = self.micro_batch_size / 2
+            return self.micro_batch_counter == trigger_batch
+        return self.micro_batch_counter == self.comm_timing
+
+    @torch.no_grad()
+    def _pack_predicted_(self, scale: float):
+        """Write predicted grads into self.flat_pred (no allocations)."""
+        offset = 0
+        for i, (p, g, e) in enumerate(
+            zip(self.params, self.grads, self.errors)
+        ):
+            n = self.tensor_numels[i]
+            if g is None:
+                # Keep consistent with old logic: mark pred as None.
+                self.grads_pred[i] = None
+                self.flat_pred[offset: offset + n].zero_()
+                offset += n
+                continue
+
+            if e is None:
+                # Keep error tensor persistent to avoid allocs
+                e = torch.zeros_like(g)
+                self.errors[i] = e
+
+            # p_pred = g * scale + e
+            # Write into flat buffer directly.
+            self.flat_pred[offset: offset + n].copy_(
+                (g * scale + e).reshape(-1)
+            )
+            offset += n
+
+            # Keep grads_pred logical view for compatibility/debug
+            self.grads_pred[i] = g * scale + e
+
+    @torch.no_grad()
+    def _unpack_predicted_(self):
+        """Scatter reduced predicted grads into param.grad (no clone)."""
+        offset = 0
+        for i, p in enumerate(self.params):
+            n = self.tensor_numels[i]
+            if self.grads_pred[i] is None:
+                p.grad = None
+                offset += n
+                continue
+
+            # Ensure grad tensor exists; then copy into it.
+            if p.grad is None or p.grad.numel() != n:
+                p.grad = torch.empty_like(p)
+            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            offset += n
+
+    def __call__(self, *args, **kwds):
+        # Accumulate grads (same as GpipeHook)
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
+            if self.grads[i] is None:
+                self.grads[i] = torch.zeros_like(p.grad)
+            self.grads[i].add_(p.grad)
+
+        if self._trigger_condition():
+            scale = self.micro_batch_size / (self.micro_batch_counter + 1)
+            self._pack_predicted_(scale=scale)
+
+            # Async DP all-reduce on flat buffer
+            self.comm_handle = dist.all_reduce(
+                self.flat_pred,
+                group=self.dp_group,
+                async_op=True,
+            )
+
+            # Clear error buffers (same semantic as old code)
+            for e in self.errors:
+                if e is not None:
+                    e.zero_()
+
+        self.micro_batch_counter += 1
+
+        if self.micro_batch_counter == self.micro_batch_size:
+            # Wait for DP reduction
+            if self.comm_handle is not None:
+                self.comm_handle.wait()
+
+            # Update errors: e := g - p
+            new_errors: List[Optional[torch.Tensor]] = []
+            for g, p_pred in zip(self.grads, self.grads_pred):
+                if g is None or p_pred is None:
+                    new_errors.append(None)
+                else:
+                    # Keep persistent error tensor to avoid allocs
+                    err = g - p_pred
+                    new_errors.append(err)
+            self.errors = new_errors
+
+            # Scatter reduced predicted grads to param.grad without clone
+            self._unpack_predicted_()
+
+            # Reset for next step
+            for i in range(len(self.grads)):
+                self.grads[i] = None
+            self.micro_batch_counter = 0
+            self.comm_handle = None

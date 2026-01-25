@@ -35,7 +35,7 @@ from tqdm import tqdm
 from typing import List  # Tuple
 
 from .util import get_partitions_and_pipe
-from .hooks import PolarCommHook, GpipeHook
+from .hooks import PolarCommHook, GpipeHook, PolarGpipeIoOptimHook
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
