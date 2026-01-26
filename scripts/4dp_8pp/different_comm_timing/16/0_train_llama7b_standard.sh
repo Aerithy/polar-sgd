@@ -21,7 +21,7 @@ DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
 TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
-COMM_TIMING=${COMM_TIMING:-14}
+COMM_TIMING=${COMM_TIMING:-16}
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
