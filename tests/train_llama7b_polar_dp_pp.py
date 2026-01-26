@@ -268,6 +268,13 @@ def main():
     parser.add_argument("--using_polar", type=bool, default=True)
 
     parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=500,
+        help="Maximum training steps (batches) to run; default 500.",
+    )
+
+    parser.add_argument(
         "--baseline_mode",
         type=str,
         default="manual",
@@ -375,6 +382,9 @@ def main():
         local_sgd_steps=args.local_sgd_steps,
         baseline_mode=args.baseline_mode,
     )
+
+    # Pass max_steps to args so trainer can decide how/where to stop.
+    # (Trainer reads args.max_steps if present.)
 
     trainer.train()
 

@@ -4,7 +4,7 @@ set -euo pipefail
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
 
-MASTER_ADDR=${MASTER_ADDR:-10.82.123.23}
+MASTER_ADDR=${MASTER_ADDR:-10.82.120.26}
 MASTER_PORT=${MASTER_PORT:-11234}
 
 NNODES=${NNODES:-4}
@@ -21,7 +21,7 @@ DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
 TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
-COMM_TIMING=${COMM_TIMING:-16}
+COMM_TIMING=${COMM_TIMING:-14}
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
@@ -40,4 +40,5 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
-  --comm_timing ${COMM_TIMING}
+  --comm_timing ${COMM_TIMING} \
+  --max_steps 500

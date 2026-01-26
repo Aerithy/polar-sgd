@@ -342,6 +342,8 @@ class PolarParallel:
         else:
             pbar = self.dataloader
 
+        max_steps = getattr(self.args, "max_steps", None)
+
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -355,6 +357,8 @@ class PolarParallel:
             acc_events=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
+                if max_steps is not None and batch_idx >= int(max_steps):
+                    break
                 input_ids = batch["input_ids"].to(self.device)
                 labels = batch["labels"].to(self.device) if self.stage.is_last else None
                 attention_mask = batch["attention_mask"].to(self.device)
@@ -526,6 +530,8 @@ class PolarParallel:
         else:
             pbar = self.dataloader
 
+        max_steps = getattr(self.args, "max_steps", None)
+
         # Baseline logging layout: 
         # ./log/baseline_{mode}/.../{dp_local_rank}/tb_{scalars,trace}
         baseline_root = (
@@ -558,6 +564,8 @@ class PolarParallel:
             acc_events=True,
         ) as prof:
             for batch_idx, batch in enumerate(pbar):
+                if max_steps is not None and batch_idx >= int(max_steps):
+                    break
                 input_ids = batch["input_ids"].to(self.device)
                 labels = (
                     batch["labels"].to(self.device)

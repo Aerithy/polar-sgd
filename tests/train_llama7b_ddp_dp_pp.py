@@ -268,6 +268,13 @@ def main():
     parser.add_argument("--using_polar", type=bool, default=True)
 
     parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=500,
+        help="Maximum training steps (batches) to run; default 500.",
+    )
+
+    parser.add_argument(
         "--baseline_mode",
         type=str,
         default="manual",
