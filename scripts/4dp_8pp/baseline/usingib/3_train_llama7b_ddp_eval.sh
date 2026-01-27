@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local-SGD training with periodic validation (loss/ppl).
+# Baseline DP+PP training with periodic validation (loss/ppl).
 
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
@@ -23,10 +23,10 @@ DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
 TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
-POLAR_HOOK=${POLAR_HOOK:-momentum}
-POLAR_BETA=${POLAR_BETA:-0.9}
 
-LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-4}
+BASELINE_MODE=${BASELINE_MODE:-ddp}      # ddp | manual
+USING_POLAR=${USING_POLAR:-False}
+
 MAX_STEPS=${MAX_STEPS:-500}
 
 # Validation
@@ -41,7 +41,7 @@ torchrun \
   --node_rank=${NODE_RANK} \
   --master_addr=${MASTER_ADDR} \
   --master_port=${MASTER_PORT} \
-  tests/train_llama7b_polar_dp_pp.py \
+  tests/train_llama7b_ddp_dp_pp.py \
   --pp_size ${PP_SIZE} \
   --epochs ${EPOCHS} \
   --batch_size ${BATCH_SIZE} \
@@ -52,11 +52,8 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
-  --polar_hook ${POLAR_HOOK} \
-  --polar_beta ${POLAR_BETA} \
-  --use_local_sgd \
-  --local_sgd_steps ${LOCAL_SGD_STEPS} \
-  --baseline_mode manual \
+  --baseline_mode ${BASELINE_MODE} \
+  --using_polar ${USING_POLAR} \
   --max_steps ${MAX_STEPS} \
   --eval_split "${EVAL_SPLIT}" \
   --train_val_ratio ${TRAIN_VAL_RATIO} \

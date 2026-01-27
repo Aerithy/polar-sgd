@@ -23,6 +23,8 @@ DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
 TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
+POLAR_HOOK=${POLAR_HOOK:-momentum}
+POLAR_BETA=${POLAR_BETA:-0.9}
 
 LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-4}
 
@@ -43,8 +45,7 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
-  --use_local_sgd \
-  --local_sgd_steps ${LOCAL_SGD_STEPS} \
-  --baseline_mode manual \
-  --max_steps 500
+  --polar_hook ${POLAR_HOOK} \
+  --polar_beta ${POLAR_BETA} \
+  --comm_timing ${COMM_TIMING}
 

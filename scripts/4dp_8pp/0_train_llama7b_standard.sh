@@ -22,6 +22,8 @@ TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
 COMM_TIMING=${COMM_TIMING:--1}
+POLAR_HOOK=${POLAR_HOOK:-momentum}
+POLAR_BETA=${POLAR_BETA:-0.9}
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
@@ -40,4 +42,6 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
-  --comm_timing ${COMM_TIMING}
+  --comm_timing ${COMM_TIMING} \
+  --polar_hook ${POLAR_HOOK} \
+  --polar_beta ${POLAR_BETA}

@@ -423,15 +423,51 @@ class PolarParallel:
     def train(self):
         # Register hook only if not using Local-SGD (Polar gradient prediction)
         if not self.use_local_sgd:
-            self.stage.submod.register_full_backward_hook(GpipeHook(
-                device_mesh=self.device_mesh,
-                model=self.stage.submod,
-                grads=self.gradients,
-                grads_pred=self.grads_pred,
-                errors=self.errors,
-                micro_batch_size=self.micro_batches,
-                comm_timing=self.comm_timing,
-            ))
+            polar_hook = getattr(self.args, "polar_hook", "io")
+            polar_beta = float(getattr(self.args, "polar_beta", 0.9))
+
+            if polar_hook == "momentum":
+                from .hooks import PolarGpipeMomentumExtrapHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeMomentumExtrapHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                        beta=polar_beta,
+                    )
+                )
+            elif polar_hook == "io":
+                from .hooks import PolarGpipeIoOptimHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeIoOptimHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                    )
+                )
+            else:
+                # Legacy scaling hook
+                self.stage.submod.register_full_backward_hook(
+                    GpipeHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                    )
+                )
 
         global_step = 0
         if self.stage.is_last:

@@ -24,6 +24,8 @@ TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
 COMM_TIMING=${COMM_TIMING:-16}
+POLAR_HOOK=${POLAR_HOOK:-momentum}
+POLAR_BETA=${POLAR_BETA:-0.9}
 
 MAX_STEPS=${MAX_STEPS:-500}
 
@@ -51,8 +53,5 @@ torchrun \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
   --comm_timing ${COMM_TIMING} \
-  --max_steps ${MAX_STEPS} \
-  --eval_split "${EVAL_SPLIT}" \
-  --train_val_ratio ${TRAIN_VAL_RATIO} \
-  --eval_interval ${EVAL_INTERVAL} \
-  --eval_max_batches ${EVAL_MAX_BATCHES}
+  --polar_hook ${POLAR_HOOK} \
+  --polar_beta ${POLAR_BETA}

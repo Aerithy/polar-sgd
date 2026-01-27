@@ -744,3 +744,176 @@ class OneStepDelayHook:
             p.grad = None
 
         self.step_idx += 1
+
+class PolarGpipeMomentumExtrapHook:
+    """POLAR hook without scaling; uses momentum/trend extrapolation.
+
+    Compared to `PolarGpipeIoOptimHook` / `GpipeHook`:
+      - NO microbatch scaling factor (no `g * scale`).
+      - Prediction uses an EMA momentum buffer `m`:
+
+            m_t = beta * m_{t-1} + (1 - beta) * g_t
+            pred = m_t + e
+
+        where `g_t` is the accumulated gradient over the whole step.
+
+    Communication:
+      - At the trigger microbatch, we all-reduce the *current prediction*
+        asynchronously (still uses the IO-optimized flat buffer path).
+      - At end of step, we wait, update error feedback `e := g - pred`,
+        and write the reduced prediction to `param.grad`.
+
+    Notes:
+      - This hook is compatible with the existing wrapper lists:
+        `grads`, `grads_pred`, `errors`.
+      - If you use this hook, you still call `optimizer.step()` as usual
+        (same as other POLAR hooks).
+    """
+
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        grads: List[Optional[torch.Tensor]],
+        grads_pred: List[Optional[torch.Tensor]],
+        errors: List[Optional[torch.Tensor]],
+        micro_batch_size: int,
+        comm_timing: int,
+        beta: float = 0.9,
+    ):
+        self.device_mesh = device_mesh
+        self.model = model
+
+        self.pp_mesh = device_mesh["pp"]
+        self.dp_mesh = device_mesh["dp"]
+        self.dp_group = self.dp_mesh.get_group()
+
+        self.pp_local_rank = self.device_mesh.get_local_rank("pp")
+        self.micro_batch_size = int(micro_batch_size)
+        self.comm_timing = int(comm_timing)
+
+        self.beta = float(beta)
+
+        # External state lists
+        self.grads = grads
+        self.grads_pred = grads_pred
+        self.errors = errors
+
+        self.micro_batch_counter = 0
+        self.comm_handle: Optional[dist.Work] = None
+
+        # Stable param list
+        self.params: List[torch.nn.Parameter] = [
+            p for p in self.model.parameters()
+        ]
+
+        # Momentum buffers (per-parameter)
+        self.momentum: List[Optional[torch.Tensor]] = [
+            None for _ in self.params
+        ]
+
+        # Precompute flatten layout
+        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        self.original_shapes: List[torch.Size] = [p.shape for p in self.params]
+        total_numel = int(sum(self.tensor_numels))
+
+        dev = next(self.model.parameters()).device
+        dtype = next(self.model.parameters()).dtype
+        self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
+
+    def _trigger_condition(self) -> bool:
+        if self.comm_timing == -1:
+            trigger_batch = self.micro_batch_size / 2
+            return self.micro_batch_counter == trigger_batch
+        return self.micro_batch_counter == self.comm_timing
+
+    @torch.no_grad()
+    def _pack_predicted_(self):
+        """Write predicted grads (momentum extrapolated) into flat buffer."""
+        offset = 0
+        for i, (p, g, e) in enumerate(
+            zip(self.params, self.grads, self.errors)
+        ):
+            n = self.tensor_numels[i]
+            if g is None:
+                self.grads_pred[i] = None
+                self.flat_pred[offset: offset + n].zero_()
+                offset += n
+                continue
+
+            if self.momentum[i] is None:
+                self.momentum[i] = torch.zeros_like(g)
+
+            # m = beta*m + (1-beta)*g
+            m = self.momentum[i]
+            m.mul_(self.beta).add_(g, alpha=(1.0 - self.beta))
+
+            if e is None:
+                e = torch.zeros_like(g)
+                self.errors[i] = e
+
+            pred = m + e
+            self.grads_pred[i] = pred
+            self.flat_pred[offset: offset + n].copy_(pred.reshape(-1))
+            offset += n
+
+    @torch.no_grad()
+    def _unpack_predicted_(self):
+        offset = 0
+        for i, p in enumerate(self.params):
+            n = self.tensor_numels[i]
+            if self.grads_pred[i] is None:
+                p.grad = None
+                offset += n
+                continue
+            if p.grad is None or p.grad.numel() != n:
+                p.grad = torch.empty_like(p)
+            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            offset += n
+
+    def __call__(self, *args, **kwds):
+        # Accumulate raw grads across microbatches
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
+            if self.grads[i] is None:
+                self.grads[i] = torch.zeros_like(p.grad)
+            self.grads[i].add_(p.grad)
+
+        if self._trigger_condition():
+            # No scaling here; prediction uses momentum/EMA.
+            self._pack_predicted_()
+            self.comm_handle = dist.all_reduce(
+                self.flat_pred,
+                group=self.dp_group,
+                async_op=True,
+            )
+
+            # Clear errors (same semantic as existing POLAR code)
+            for e in self.errors:
+                if e is not None:
+                    e.zero_()
+
+        self.micro_batch_counter += 1
+
+        if self.micro_batch_counter == self.micro_batch_size:
+            if self.comm_handle is not None:
+                self.comm_handle.wait()
+
+            # Update error feedback: e := g - pred
+            new_errors: List[Optional[torch.Tensor]] = []
+            for g, p_pred in zip(self.grads, self.grads_pred):
+                if g is None or p_pred is None:
+                    new_errors.append(None)
+                else:
+                    new_errors.append(g - p_pred)
+            self.errors = new_errors
+
+            # Write reduced predicted grads to param.grad
+            self._unpack_predicted_()
+
+            # Reset for next step
+            for i in range(len(self.grads)):
+                self.grads[i] = None
+            self.micro_batch_counter = 0
+            self.comm_handle = None
