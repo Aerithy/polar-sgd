@@ -299,6 +299,37 @@ def main():
         help="Synchronize parameters every N steps in Local-SGD mode"
     )
     
+    parser.add_argument(
+        "--eval_split",
+        type=str,
+        default="",
+        help=(
+            "Optional HF dataset split used for validation, e.g. 'validation'. "
+            "If empty, no validation will be run."
+        ),
+    )
+    parser.add_argument(
+        "--train_val_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "If >0 and eval_split is empty, split train into train/val with "
+            "this ratio used for val (e.g. 0.01)."
+        ),
+    )
+    parser.add_argument(
+        "--eval_interval",
+        type=int,
+        default=50,
+        help="Run validation every N steps on the last stage (0 disables).",
+    )
+    parser.add_argument(
+        "--eval_max_batches",
+        type=int,
+        default=20,
+        help="Max validation batches per eval (0 means full eval dataloader).",
+    )
+
     args = parser.parse_args()
 
     dist.init_process_group(backend="nccl", init_method="env://")
@@ -346,21 +377,47 @@ def main():
         seq_length=args.seq_length,
         batch_size=args.batch_size,
         use_auth_token=args.use_auth_token,
-        split="train"
+        split="train",
     )
-    # sampler = DistributedSampler(
-    #     dataloader.dataset,
-    #     num_replicas=dp_size,
-    #     rank=dp_rank,
-    #     shuffle=True,
-    # )
-    # dataloader = DataLoader(
-    #     dataloader.dataset,
-    #     batch_size=args.batch_size,
-    #     # sampler=sampler,
-    #     pin_memory=False,
-    # )
     
+    eval_dataloader = None
+    if args.eval_split:
+        eval_dataloader, _ = get_dataloader(
+            pp_size=pp_size,
+            dataset_name=args.dataset,
+            dataset_config=args.dataset_config,
+            tokenizer_name=args.tokenizer,
+            seq_length=args.seq_length,
+            batch_size=args.batch_size,
+            use_auth_token=args.use_auth_token,
+            split=args.eval_split,
+        )
+    elif args.train_val_ratio and args.train_val_ratio > 0:
+        from torch.utils.data import random_split
+
+        n = len(dataloader.dataset)
+        n_val = max(1, int(n * float(args.train_val_ratio)))
+        n_train = n - n_val
+        train_ds, val_ds = random_split(dataloader.dataset, [n_train, n_val])
+
+        # Rebuild train/eval dataloaders with same batch_size.
+        dataloader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True,
+            drop_last=True,
+        )
+        eval_dataloader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+            drop_last=False,
+        )
+
     def loss_fn(output, target):
         shift_logits = output[..., :-1, :].contiguous()
         shift_labels = target[..., 1:].contiguous()
@@ -378,6 +435,9 @@ def main():
         stage_model=stage_model,
         dataloader=dataloader,
         comm_timing=args.comm_timing,
+        eval_dataloader=eval_dataloader,
+        eval_interval=args.eval_interval,
+        eval_max_batches=args.eval_max_batches,
         use_local_sgd=args.use_local_sgd,
         local_sgd_steps=args.local_sgd_steps,
         baseline_mode=args.baseline_mode,

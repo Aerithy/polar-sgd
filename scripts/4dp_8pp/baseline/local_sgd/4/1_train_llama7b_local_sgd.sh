@@ -45,4 +45,5 @@ torchrun \
   --micro_batches ${MICRO_BATCHES} \
   --use_local_sgd \
   --local_sgd_steps ${LOCAL_SGD_STEPS} \
-  --baseline_mode manual
+  --baseline_mode manual \
+  --max_steps 500

@@ -35,7 +35,7 @@ from tqdm import tqdm
 from typing import List  # Tuple
 
 from .util import get_partitions_and_pipe
-from .hooks import PolarCommHook, GpipeHook, PolarGpipeIoOptimHook
+from .hooks import PolarCommHook, GpipeHook
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -167,6 +167,9 @@ class PolarParallel:
         loss_fn,
         dataloader: DataLoader,
         comm_timing: int,
+        eval_dataloader: DataLoader | None = None,
+        eval_interval: int = 50,
+        eval_max_batches: int = 20,
         optimizer="adamw",
         use_local_sgd: bool = False,
         local_sgd_steps: int = 1,
@@ -181,6 +184,7 @@ class PolarParallel:
             stage_model: partitioned model for this stage
             loss_fn: loss function
             dataloader (DataLoader): training datasets
+            eval_dataloader (DataLoader): optional evaluation dataloader
             comm_timing (int): communication timing parameter
             optimizer (str): optimizer type
             use_local_sgd (bool): enable Local-SGD mode
@@ -277,6 +281,9 @@ class PolarParallel:
         # dp_rank = self.dp_mesh.get_local_rank()
 
         self.dataloader = dataloader
+        self.eval_dataloader = eval_dataloader
+        self.eval_interval = int(eval_interval) if eval_interval is not None else 0
+        self.eval_max_batches = int(eval_max_batches) if eval_max_batches is not None else 0
 
         self.schedule = Schedule1F1B(
             self.stage,
@@ -323,6 +330,79 @@ class PolarParallel:
             dist.all_reduce(p.grad, op=dist.ReduceOp.SUM, group=dp_group)
             p.grad.div_(dp_size)
 
+    @torch.no_grad()
+    def _evaluate_val_loss_ppl(self):
+        """Validation loss/perplexity (LM) on eval_dataloader.
+
+        Only last stage can compute the loss (it has logits). We aggregate
+        across DP by summing loss*ntokens and ntokens.
+        """
+        if self.eval_dataloader is None:
+            return None, None
+
+        self.stage.submod.eval()
+
+        total_loss_times_tokens = torch.tensor(
+            0.0, device=self.device, dtype=torch.float32
+        )
+        total_tokens = torch.tensor(0, device=self.device, dtype=torch.long)
+
+        is_last = self.stage.is_last
+
+        for bidx, batch in enumerate(self.eval_dataloader):
+            if self.eval_max_batches and bidx >= self.eval_max_batches:
+                break
+
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device) if is_last else None
+
+            if self.stage.is_first:
+                self.schedule.step(input_ids, attention_mask=attention_mask)
+            elif is_last:
+                out = self.stage.submod(
+                    input_ids,
+                    attention_mask=attention_mask,
+                )
+                logits = out.logits
+
+                # LM loss, ignore pad (0)
+                shift_logits = logits[..., :-1, :]
+                shift_labels = labels[..., 1:]
+                valid = shift_labels.ne(0)
+                n_tokens = valid.sum()
+                if n_tokens.item() > 0:
+                    import torch.nn.functional as F
+
+                    loss = F.cross_entropy(
+                        shift_logits.reshape(-1, shift_logits.size(-1)),
+                        shift_labels.reshape(-1),
+                        ignore_index=0,
+                        reduction="mean",
+                    )
+                    total_loss_times_tokens += loss * n_tokens.float()
+                    total_tokens += n_tokens
+            else:
+                self.schedule.step(attention_mask=attention_mask)
+
+        if self.dp_mesh.size() > 1:
+            dist.all_reduce(
+                total_loss_times_tokens,
+                op=dist.ReduceOp.SUM,
+                group=self.dp_mesh.get_group(),
+            )
+            dist.all_reduce(
+                total_tokens,
+                op=dist.ReduceOp.SUM,
+                group=self.dp_mesh.get_group(),
+            )
+
+        avg_loss = (total_loss_times_tokens / total_tokens.clamp_min(1)).item()
+        ppl = float(torch.exp(torch.tensor(avg_loss)).item())
+
+        self.stage.submod.train()
+        return avg_loss, ppl
+
     def train(self):
         # Register hook only if not using Local-SGD (Polar gradient prediction)
         if not self.use_local_sgd:
@@ -360,7 +440,11 @@ class PolarParallel:
                 if max_steps is not None and batch_idx >= int(max_steps):
                     break
                 input_ids = batch["input_ids"].to(self.device)
-                labels = batch["labels"].to(self.device) if self.stage.is_last else None
+                labels = (
+                    batch["labels"].to(self.device)
+                    if self.stage.is_last
+                    else None
+                )
                 attention_mask = batch["attention_mask"].to(self.device)
 
                 if self.optimizer:
@@ -389,8 +473,25 @@ class PolarParallel:
                 global_step += 1
 
                 # Local-SGD: sync parameters every N steps
-                if self.use_local_sgd and (self.local_step_counter % self.local_sgd_steps == 0):
+                if self.use_local_sgd and (
+                    self.local_step_counter % self.local_sgd_steps == 0
+                ):
                     self._sync_parameters_local_sgd()
+
+                # Optional eval
+                if (
+                    self.eval_dataloader is not None
+                    and self.eval_interval > 0
+                    and (global_step % self.eval_interval == 0)
+                ):
+                    val_loss, val_ppl = self._evaluate_val_loss_ppl()
+                    if self.stage.is_last and val_loss is not None:
+                        self.writer.add_scalar('Loss/val', val_loss, global_step)
+                        self.writer.add_scalar('Perplexity/val', val_ppl, global_step)
+                        print(
+                            f"[val] step={global_step} "
+                            f"loss={val_loss:.4f} ppl={val_ppl:.2f}"
+                        )
 
                 prof.step()
 
@@ -437,8 +538,10 @@ class PolarParallel:
                     labels = batch["labels"].to(self.device)
                 else:
                     labels = None
-                attention_mask = batch["attention_mask"].to(self.device)
-                # output = None
+                # attention_mask = batch["attention_mask"].to(self.device)
+                # attention_mask currently unused in this legacy path
+                _attention_mask = batch["attention_mask"].to(self.device)
+                del _attention_mask
 
                 if self.optimizer:
                     self.optimizer.zero_grad()

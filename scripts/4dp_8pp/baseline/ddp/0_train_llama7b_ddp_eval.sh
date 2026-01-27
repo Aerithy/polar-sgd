@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local-SGD training (PolarParallel.train) with parameter sync every N steps.
+# Baseline DP+PP training (tests/train_llama7b_ddp_dp_pp.py) with periodic
+# validation (loss/ppl). Validation is computed on last pipeline stage.
 
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
 
-MASTER_ADDR=${MASTER_ADDR:-10.82.120.26}
+MASTER_ADDR=${MASTER_ADDR:-10.82.123.23}
 MASTER_PORT=${MASTER_PORT:-11234}
 
 NNODES=${NNODES:-4}
@@ -24,7 +25,16 @@ TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
 
-LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-4}
+BASELINE_MODE=${BASELINE_MODE:-ddp}      # ddp | manual
+USING_POLAR=${USING_POLAR:-False}
+
+MAX_STEPS=${MAX_STEPS:-500}
+
+# Validation
+EVAL_SPLIT=${EVAL_SPLIT:-}                 # e.g. validation
+TRAIN_VAL_RATIO=${TRAIN_VAL_RATIO:-0.0}    # e.g. 0.01
+EVAL_INTERVAL=${EVAL_INTERVAL:-50}
+EVAL_MAX_BATCHES=${EVAL_MAX_BATCHES:-20}
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
@@ -32,7 +42,7 @@ torchrun \
   --node_rank=${NODE_RANK} \
   --master_addr=${MASTER_ADDR} \
   --master_port=${MASTER_PORT} \
-  tests/train_llama7b_polar_dp_pp.py \
+  tests/train_llama7b_ddp_dp_pp.py \
   --pp_size ${PP_SIZE} \
   --epochs ${EPOCHS} \
   --batch_size ${BATCH_SIZE} \
@@ -43,7 +53,10 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
-  --use_local_sgd \
-  --local_sgd_steps ${LOCAL_SGD_STEPS} \
-  --baseline_mode manual \
-  --max_steps 500
+  --baseline_mode ${BASELINE_MODE} \
+  --using_polar ${USING_POLAR} \
+  --max_steps ${MAX_STEPS} \
+  --eval_split "${EVAL_SPLIT}" \
+  --train_val_ratio ${TRAIN_VAL_RATIO} \
+  --eval_interval ${EVAL_INTERVAL} \
+  --eval_max_batches ${EVAL_MAX_BATCHES}

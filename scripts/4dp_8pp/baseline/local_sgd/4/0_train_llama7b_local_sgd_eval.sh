@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local-SGD training (PolarParallel.train) with parameter sync every N steps.
+# Local-SGD training with periodic validation (loss/ppl).
+# Enable validation by setting either:
+#   - EVAL_SPLIT=validation (preferred if dataset provides it)
+#   - TRAIN_VAL_RATIO=0.01 (split train into train/val)
 
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
@@ -25,6 +28,13 @@ OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
 
 LOCAL_SGD_STEPS=${LOCAL_SGD_STEPS:-4}
+MAX_STEPS=${MAX_STEPS:-500}
+
+# Validation
+EVAL_SPLIT=${EVAL_SPLIT:-}                 # e.g. validation
+TRAIN_VAL_RATIO=${TRAIN_VAL_RATIO:-0.0}    # e.g. 0.01
+EVAL_INTERVAL=${EVAL_INTERVAL:-50}
+EVAL_MAX_BATCHES=${EVAL_MAX_BATCHES:-20}
 
 torchrun \
   --nproc_per_node=${NPROC_PER_NODE} \
@@ -46,4 +56,8 @@ torchrun \
   --use_local_sgd \
   --local_sgd_steps ${LOCAL_SGD_STEPS} \
   --baseline_mode manual \
-  --max_steps 500
+  --max_steps ${MAX_STEPS} \
+  --eval_split "${EVAL_SPLIT}" \
+  --train_val_ratio ${TRAIN_VAL_RATIO} \
+  --eval_interval ${EVAL_INTERVAL} \
+  --eval_max_batches ${EVAL_MAX_BATCHES}
