@@ -271,11 +271,15 @@ def main():
         "--polar_hook",
         type=str,
         default="momentum",
-        choices=["io", "momentum", "gpipe"],
+        choices=["io", "momentum", "gpipe", "ef_only", "scaling_only", "none"],
         help=(
             "Which POLAR gradient prediction hook to use: "
             "'momentum' (no scaling, EMA momentum extrapolation), "
-            "'io' (IO-optimized scaling hook), or 'gpipe' (legacy scaling hook)."
+            "'io' (IO-optimized scaling hook), "
+            "'gpipe' (legacy scaling hook), "
+            "'ef_only' (error feedback only), "
+            "'scaling_only' (scaling only), "
+            "or 'none' (no scaling, no error feedback)."
         ),
     )
     parser.add_argument(

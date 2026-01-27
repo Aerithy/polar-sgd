@@ -455,6 +455,48 @@ class PolarParallel:
                         comm_timing=self.comm_timing,
                     )
                 )
+            elif polar_hook == "ef_only":
+                from .hooks import PolarGpipeErrorFeedbackOnlyHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeErrorFeedbackOnlyHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                    )
+                )
+            elif polar_hook == "scaling_only":
+                from .hooks import PolarGpipeScalingOnlyHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeScalingOnlyHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                    )
+                )
+            elif polar_hook == "none":
+                from .hooks import PolarGpipeNothingHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeNothingHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
+                        grads=self.gradients,
+                        grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                    )
+                )
             else:
                 # Legacy scaling hook
                 self.stage.submod.register_full_backward_hook(
