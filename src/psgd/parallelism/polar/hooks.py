@@ -960,6 +960,18 @@ class PolarGpipeErrorFeedbackOnlyHook:
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
         ]
+        # Flatten layout + reusable flat buffer
+        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        total_numel = int(sum(self.tensor_numels))
+        dev = next(self.model.parameters()).device
+        dtype = next(self.model.parameters()).dtype
+        self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
+
+    def _trigger_condition(self) -> bool:
+        if self.comm_timing == -1:
+            trigger_batch = self.micro_batch_size / 2
+            return self.micro_batch_counter == trigger_batch
+        return self.micro_batch_counter == self.comm_timing
 
     @torch.no_grad()
     def _pack_predicted_(self):
