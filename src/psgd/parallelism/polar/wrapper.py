@@ -273,10 +273,12 @@ class PolarParallel:
         self.optimizer_name = optimizer
         if optimizer == "adamw":
             self.optimizer = torch.optim.AdamW(
-                self.stage.submod.parameters(), lr=1e-4)
+                self.stage.submod.parameters(), lr=self.lr
+            )
         elif optimizer == "sgd":
             self.optimizer = torch.optim.SGD(
-                self.stage.submod.parameters(), lr=1e-3)
+                self.stage.submod.parameters(), lr=self.lr
+            )
 
         # dp_rank = self.dp_mesh.get_local_rank()
 
@@ -289,6 +291,20 @@ class PolarParallel:
             self.stage,
             n_microbatches=micro_batches,
             loss_fn=loss_fn
+        )
+
+        # Use CLI lr if provided (scripts pass --lr). Fall back to a
+        # reasonable optimizer-specific default.
+        self.lr = float(
+            getattr(
+                self.args,
+                "lr",
+                5e-4 if optimizer == "adamw" else 1e-3,
+            )
+        )
+        logger.info(
+            f"[PolarParallel:init] optimizer={optimizer} lr={self.lr} "
+            f"baseline_mode={self.baseline_mode} use_local_sgd={self.use_local_sgd}"
         )
 
         self.errors = [None for param in self.stage.submod.parameters()]
@@ -604,9 +620,9 @@ class PolarParallel:
 
         # Optimizer over the actual module used
         if self.optimizer_name == "sgd":
-            optimizer = torch.optim.SGD(stage_mod.parameters(), lr=1e-3)
+            optimizer = torch.optim.SGD(stage_mod.parameters(), lr=self.lr)
         elif self.optimizer_name == "adamw":
-            optimizer = torch.optim.AdamW(stage_mod.parameters(), lr=1e-4)
+            optimizer = torch.optim.AdamW(stage_mod.parameters(), lr=self.lr)
         else:
             raise ValueError(f"Unknown optimizer: {self.optimizer_name}")
 
