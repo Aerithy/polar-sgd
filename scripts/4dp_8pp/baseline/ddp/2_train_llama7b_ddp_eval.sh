@@ -23,6 +23,8 @@ DATASET_CONFIG=${DATASET_CONFIG:-wikitext-103-raw-v1}
 TOKENIZER=${TOKENIZER:-hf-internal-testing/llama-tokenizer}
 OUTPUT_DIR=${OUTPUT_DIR:-./checkpoints}
 MICRO_BATCHES=${MICRO_BATCHES:-32}
+POLAR_HOOK=${POLAR_HOOK:-momentum}
+POLAR_BETA=${POLAR_BETA:-0.9}
 
 BASELINE_MODE=${BASELINE_MODE:-ddp}      # ddp | manual
 USING_POLAR=${USING_POLAR:-False}
@@ -52,6 +54,9 @@ torchrun \
   --tokenizer ${TOKENIZER} \
   --output_dir ${OUTPUT_DIR} \
   --micro_batches ${MICRO_BATCHES} \
+  --polar_hook ${POLAR_HOOK} \
+  --polar_beta ${POLAR_BETA} \
+  --comm_timing ${COMM_TIMING} \
   --baseline_mode ${BASELINE_MODE} \
   --using_polar ${USING_POLAR} \
   --max_steps ${MAX_STEPS} \

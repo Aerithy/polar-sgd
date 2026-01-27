@@ -268,6 +268,24 @@ def main():
     parser.add_argument("--using_polar", type=bool, default=True)
 
     parser.add_argument(
+        "--polar_hook",
+        type=str,
+        default="momentum",
+        choices=["io", "momentum", "gpipe"],
+        help=(
+            "Which POLAR gradient prediction hook to use: "
+            "'momentum' (no scaling, EMA momentum extrapolation), "
+            "'io' (IO-optimized scaling hook), or 'gpipe' (legacy scaling hook)."
+        ),
+    )
+    parser.add_argument(
+        "--polar_beta",
+        type=float,
+        default=0.9,
+        help="EMA momentum beta for polar_hook=momentum.",
+    )
+
+    parser.add_argument(
         "--max_steps",
         type=int,
         default=500,
