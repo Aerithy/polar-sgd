@@ -269,6 +269,16 @@ class PolarParallel:
                 broadcast_buffers=False,  # Pipeline does not require sync
             )
 
+        # Use CLI lr if provided (scripts pass --lr). Fall back to a
+        # reasonable optimizer-specific default.
+        self.lr = float(
+            getattr(
+                self.args,
+                "lr",
+                5e-4 if optimizer == "adamw" else 1e-3,
+            )
+        )
+
         self.optimizer = None
         self.optimizer_name = optimizer
         if optimizer == "adamw":
@@ -293,15 +303,6 @@ class PolarParallel:
             loss_fn=loss_fn
         )
 
-        # Use CLI lr if provided (scripts pass --lr). Fall back to a
-        # reasonable optimizer-specific default.
-        self.lr = float(
-            getattr(
-                self.args,
-                "lr",
-                5e-4 if optimizer == "adamw" else 1e-3,
-            )
-        )
         logger.info(
             f"[PolarParallel:init] optimizer={optimizer} lr={self.lr} "
             f"baseline_mode={self.baseline_mode} use_local_sgd={self.use_local_sgd}"
