@@ -4,7 +4,8 @@ set -euo pipefail
 # Baseline DP+PP training (tests/train_llama7b_ddp_dp_pp.py) with periodic
 # validation (loss/ppl). Validation is computed on last pipeline stage.
 
-export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
+export NCCL_IB_HCA=${NCCL_IB_HCA:-mlx5}
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth01}
 
 MASTER_ADDR=${MASTER_ADDR:-10.82.120.26}
