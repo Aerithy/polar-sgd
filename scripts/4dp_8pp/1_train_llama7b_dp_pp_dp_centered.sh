@@ -31,7 +31,7 @@ torchrun \
   --batch_size 128 \
   --seq_length 512 \
   --micro_batches 32 \
-  --lr 1e-4 \
+  --lr 5e-4 \
   --warmup_steps 5 \
   --steps 50 \
   --dataset wikitext \

@@ -5,7 +5,7 @@ tests/train_llama7b_polar_dp_pp.py                  \
 --epochs 1                                          \
 --batch_size 128                                     \
 --seq_length 512                                    \
---lr 1e-4                                           \
+--lr 5e-4                                           \
 --dataset wikitext                                  \
 --dataset_config wikitext-103-raw-v1                \
 --tokenizer hf-internal-testing/llama-tokenizer     \

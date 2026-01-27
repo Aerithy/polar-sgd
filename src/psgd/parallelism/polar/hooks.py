@@ -629,3 +629,118 @@ class PolarGpipeIoOptimHook:
                 self.grads[i] = None
             self.micro_batch_counter = 0
             self.comm_handle = None
+
+class OneStepDelayHook:
+    """One-step delayed SGD (no error compensation).
+
+    Policy:
+      - Step 0 (first full step): compute grads, DP all-reduce, store as
+        `prev_flat`, but do NOT apply update (freeze).
+      - Step t (t>=1):
+          * Apply update using grads from step t-1 (`prev_flat`).
+          * Compute current grads, DP all-reduce into `cur_flat`.
+          * Swap: prev_flat <- cur_flat.
+
+    Notes:
+      - This is a *hook-driven* optimizer: it directly updates parameters.
+        You must NOT call optimizer.step() in the training loop when this hook
+        is enabled (otherwise you'd double-apply updates).
+      - Works for pipeline parallel stages: hook triggers at end of each global
+        step (after `micro_batch_size` microbatches).
+      - DP sync is done with all-reduce(SUM) and divide by dp_size.
+    """
+
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        micro_batch_size: int,
+        lr: float = 1e-4,
+        weight_decay: float = 0.0,
+    ):
+        self.device_mesh = device_mesh
+        self.model = model
+
+        self.dp_mesh = device_mesh["dp"]
+        self.dp_group = self.dp_mesh.get_group()
+        self.dp_size = self.dp_mesh.size()
+
+        self.micro_batch_size = int(micro_batch_size)
+        self.micro_batch_counter = 0
+
+        self.lr = float(lr)
+        self.weight_decay = float(weight_decay)
+
+        # Stable parameter list
+        self.params: List[torch.nn.Parameter] = [
+            p for p in self.model.parameters()
+        ]
+
+        # Flatten layout
+        self.numels: List[int] = [int(p.numel()) for p in self.params]
+        self.shapes: List[torch.Size] = [p.shape for p in self.params]
+        self.total_numel = int(sum(self.numels))
+
+        dev = next(self.model.parameters()).device
+        dtype = next(self.model.parameters()).dtype
+
+        # Buffers
+        self.cur_flat = torch.empty(self.total_numel, device=dev, dtype=dtype)
+        self.prev_flat: Optional[torch.Tensor] = None
+
+        self.step_idx = 0
+
+    @torch.no_grad()
+    def _apply_update_from_flat_(self, flat: torch.Tensor):
+        """In-place SGD update using flattened grads."""
+        offset = 0
+        for p, n in zip(self.params, self.numels):
+            g = flat[offset: offset + n].view(p.shape)
+            if self.weight_decay != 0.0:
+                # Decoupled weight decay (AdamW) would be p *= (1-lr*wd).
+                # Here we do classic L2 regularization: g += wd * p
+                g = g.add(p, alpha=self.weight_decay)
+            p.add_(g, alpha=-self.lr)
+            offset += n
+
+    def __call__(self, *args, **kwds):
+        # Accumulate grads across microbatches (same spirit as GpipeHook)
+        for p in self.params:
+            if p.grad is None:
+                continue
+            # no accumulation buffer: rely on autograd accumulation;
+            # just leave p.grad as is.
+
+        self.micro_batch_counter += 1
+
+        if self.micro_batch_counter < self.micro_batch_size:
+            return
+
+        # End of a global step
+        self.micro_batch_counter = 0
+
+        # Apply update using previous step grads (freeze at step0)
+        if self.prev_flat is not None:
+            self._apply_update_from_flat_(self.prev_flat)
+
+        # Build current flat grad buffer and DP all-reduce
+        self._flatten_grads_(self.cur_flat)
+
+        if self.dp_size > 1:
+            dist.all_reduce(
+                self.cur_flat,
+                op=dist.ReduceOp.SUM,
+                group=self.dp_group,
+            )
+            self.cur_flat.div_(self.dp_size)
+
+        # Save for next step
+        if self.prev_flat is None:
+            self.prev_flat = torch.empty_like(self.cur_flat)
+        self.prev_flat.copy_(self.cur_flat)
+
+        # Clear grads so next step doesn't accidentally reuse them
+        for p in self.params:
+            p.grad = None
+
+        self.step_idx += 1
