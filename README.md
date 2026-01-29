@@ -37,6 +37,16 @@ To run standard ddp or manually all-reduce based dp training with pp hybrid, you
 
 Humorous experiments scripts have been done to compare Polar SGD with baseline ddp and local sgd. Please refer to directory `scripts` for more details.
 
+## Methodology 
+
+now the repository not only implements the basic method published in our paper, but also enable different gradient prediction methods, such as: 
+- Naive: use the last gradient as the prediction for all the future gradients.
+- Linear: use linear regression to predict the future gradients based on previous gradients.
+- EMA: use exponential moving average to predict the future gradients.
+- Delayed: use the gradient from previous time steps as the prediction for future gradients with a delay.
+
+The experiments in our paper are based on the naive prediction method. You can specify the prediction method by changing the `--gradient_prediction_method` argument in the training script. If you have further insights or ideas about gradient prediction, you are welcome to implement your own method and contribute to this repository.
+
 <!-- SGD formula on node $i$: 
 
 $$
