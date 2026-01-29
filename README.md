@@ -1,6 +1,43 @@
 # polar-sgd
 
-SGD formula on node $i$: 
+To reduce communication overhead in cross dc distributed training, we implement a method called Polar SGD.
+
+Polar SGD is designed to improve the efficiency of distributed training by overlapping communication and computation. It achieves this by predicting gradients for future time steps and using these predictions to update the model parameters.
+
+## prepare environment
+
+just run following command to install required packages
+
+```bash
+conda create -n polar-sgd python=3.12
+cd polar-sgd
+pip install -e .
+```
+
+then you need to login into your huggingface account to download the model weights and tokenizer and dataset.
+
+```bash
+huggingface-cli login
+```
+
+## Run Polar SGD
+
+To run Polar SGD, you can use the following command on each node, replacing `{RANK}` with the node's rank (0 to N-1):
+
+Each node is a standard dp, pp is set intra node.
+
+```bash
+sh scripts/xdp_ypp/{RANK}_train_llama7b_polar_dp_pp.sh  # Replace {RANK} with 0 to N-1
+```
+
+To enable different modes of Polar SGD, you need to change the parameters in the script files. Detailed instructions is written in `tests/train_llama7b_polar_dp_pp.py`.
+you need to specify the `--use_polar_sgd` flag in the training script to enable Polar SGD.
+
+To run standard ddp or manually all-reduce based dp training with pp hybrid, you need to run `sh scripts/xdp_ypp/baseline/ddp/{RANK}_train_llama7b_ddp_dp_pp.sh`.
+
+Humorous experiments scripts have been done to compare Polar SGD with baseline ddp and local sgd. Please refer to directory `scripts` for more details.
+
+<!-- SGD formula on node $i$: 
 
 $$
 \theta_{t + 1}^i = \theta_t^i - \eta \cdot g_t^i
@@ -72,4 +109,4 @@ $$
 
 For the formula above, we can get parameter partition $m$'s update for $t+K$ step just calculate to the $t+m$ step instead of $t+K$ step. 
 
-Further, we can get the prediction partition $m$'s parameter $\theta_{t+K, m}$ at $t+m$ step. So if we started from time step $t$, in the next K steps, we can get all the prediction partition from partition 0 to partition K-1 in each step. 
+Further, we can get the prediction partition $m$'s parameter $\theta_{t+K, m}$ at $t+m$ step. So if we started from time step $t$, in the next K steps, we can get all the prediction partition from partition 0 to partition K-1 in each step.  -->
