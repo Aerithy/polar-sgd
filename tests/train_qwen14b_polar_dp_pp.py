@@ -110,6 +110,7 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     Partition Qwen model for pipeline parallelism.
     - Keep only layers assigned to this stage
     - Remove unused components (embeddings, lm_head, etc.)
+    - Add custom forward method to handle partitioned model
     """
     config = model.config
     num_layers = config.num_hidden_layers
@@ -120,7 +121,7 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     start_layer = stage_idx * layers_per_stage + min(stage_idx, remainder)
     end_layer = start_layer + layers_per_stage + (1 if stage_idx < remainder else 0)
 
-    # Qwen uses model.layers (ModuleList)
+    # Qwen2 uses model.layers (ModuleList)
     layers_to_keep = list(range(start_layer, end_layer))
     new_layers = torch.nn.ModuleList([
         model.model.layers[i] for i in layers_to_keep
@@ -136,7 +137,9 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
         model.lm_head = None
         if hasattr(model.model, 'final_norm'):
             model.model.final_norm = None
-    # Last stage: keep lm_head and final_norm, remove embed_tokens
+        if hasattr(model, 'norm'):
+            model.norm = None
+    # Last stage: keep lm_head and norm, remove embed_tokens
     elif stage_idx == num_stages - 1:
         model.model.embed_tokens = None
     # Middle stages: remove all non-layer components
@@ -144,10 +147,45 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
         model.model.embed_tokens = None
         if hasattr(model.model, 'final_norm'):
             model.model.final_norm = None
+        if hasattr(model, 'norm'):
+            model.norm = None
         model.lm_head = None
+
+    # Custom forward method for partitioned model
+    def custom_forward(input_ids_or_hidden, attention_mask=None):
+        if model.model.embed_tokens is not None:
+            # Stage 0: input is token IDs
+            hidden_states = model.model.embed_tokens(input_ids_or_hidden)
+        else:
+            # Stage 1+: input is hidden states
+            hidden_states = input_ids_or_hidden
+
+        # Pass through layers
+        for layer in model.model.layers:
+            if isinstance(layer, torch.nn.Identity):
+                hidden_states = layer(hidden_states)
+            else:
+                hidden_states = layer(hidden_states, attention_mask=attention_mask)
+
+        # Apply final norm if present
+        if hasattr(model, 'norm') and model.norm is not None:
+            hidden_states = model.norm(hidden_states)
+        elif hasattr(model.model, 'final_norm') and model.model.final_norm is not None:
+            hidden_states = model.model.final_norm(hidden_states)
+
+        # Apply lm_head if present
+        if model.lm_head is not None:
+            return model.lm_head(hidden_states)
+        else:
+            return hidden_states
+
+    # Replace forward method
+    model.forward = custom_forward
 
     assigned_layers = list(range(start_layer, end_layer))
     print(f"[partition] Stage {stage_idx}: assigned layers {assigned_layers}")
+    print(f"[partition] Stage {stage_idx}: lm_head={model.lm_head is not None}, "
+          f"embed_tokens={model.model.embed_tokens is not None}")
     
     return model
 
