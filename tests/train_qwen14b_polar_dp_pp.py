@@ -18,7 +18,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 from typing import Iterable, Iterator, List, Optional
-
+from dataclasses import dataclass
 
 # -----------------------------
 # Training Configuration (aligned with train_qwen.py)

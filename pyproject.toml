@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "psgd"
 version = "0.1.0"
 description = "A short description"
-authors = [{name = "anonymous", email = "anonymous@anoymousmail"}]
+authors = [{name = "anonymous", email = "anonymous@anoymousmail.com"}]
 
 dependencies = [
     "torch",
