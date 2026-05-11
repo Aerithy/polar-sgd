@@ -26,12 +26,19 @@ def _to_local(tensor: torch.Tensor) -> torch.Tensor:
 def _wrap_like(local_tensor: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
     if not _is_dtensor(ref_tensor):
         return local_tensor
-    return DTensor.from_local(
-        local_tensor,
-        ref_tensor.device_mesh,
-        ref_tensor.placements,
-        global_shape=ref_tensor.shape,
-    )
+    try:
+        return DTensor.from_local(
+            local_tensor,
+            ref_tensor.device_mesh,
+            ref_tensor.placements,
+            global_shape=ref_tensor.shape,
+        )
+    except TypeError:
+        return DTensor.from_local(
+            local_tensor,
+            ref_tensor.device_mesh,
+            ref_tensor.placements,
+        )
 
 
 class GpipeHook:
