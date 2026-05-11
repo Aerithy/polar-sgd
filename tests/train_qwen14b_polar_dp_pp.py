@@ -195,11 +195,16 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
                 hidden_states = layer(hidden_states)
             else:
                 # Pass position_embeddings to Qwen2 layers
-                hidden_states = layer(
+                layer_outputs = layer(
                     hidden_states, 
                     attention_mask=attention_mask,
                     position_embeddings=position_embeddings
                 )
+                # Qwen2 layers return a tuple (hidden_states, attention_weights)
+                if isinstance(layer_outputs, tuple):
+                    hidden_states = layer_outputs[0]
+                else:
+                    hidden_states = layer_outputs
 
         # Apply final norm if present
         if hasattr(model, 'norm') and model.norm is not None:
