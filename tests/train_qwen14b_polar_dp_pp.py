@@ -171,8 +171,9 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
         # Handle position embeddings for Qwen2 RoPE
         position_embeddings = None
         
-        # Create position_ids tensor (expected by Qwen2's rotary_emb)
-        position_ids = torch.arange(seq_length, device=hidden_states.device)
+        # Create position_ids tensor with correct shape [batch_size, seq_length]
+        batch_size = hidden_states.shape[0]
+        position_ids = torch.arange(seq_length, device=hidden_states.device).unsqueeze(0).repeat(batch_size, 1)
         
         if hasattr(model.model, 'rotary_emb') and model.model.rotary_emb is not None:
             position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
