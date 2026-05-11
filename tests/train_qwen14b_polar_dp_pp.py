@@ -170,10 +170,14 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
         
         # Handle position embeddings for Qwen2 RoPE
         position_embeddings = None
+        
+        # Create position_ids tensor (expected by Qwen2's rotary_emb)
+        position_ids = torch.arange(seq_length, device=hidden_states.device)
+        
         if hasattr(model.model, 'rotary_emb') and model.model.rotary_emb is not None:
-            position_embeddings = model.model.rotary_emb(hidden_states, seq_length)
+            position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
         elif hasattr(original_model, 'rotary_emb') and original_model.rotary_emb is not None:
-            position_embeddings = original_model.rotary_emb(hidden_states, seq_length)
+            position_embeddings = original_model.rotary_emb(hidden_states, position_ids)
         else:
             # Fallback: create rotary embedding if not found
             from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
@@ -182,7 +186,7 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings
             ).to(hidden_states.device)
-            position_embeddings = rotary_emb(hidden_states, seq_length)
+            position_embeddings = rotary_emb(hidden_states, position_ids)
 
         # Pass through layers
         for layer in model.model.layers:
