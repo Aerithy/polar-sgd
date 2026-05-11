@@ -259,6 +259,8 @@ def partition_qwen_model(
                 hidden_states = _gather_seq(hidden_states)
             return model.lm_head(hidden_states)
         else:
+            if tp_size > 1:
+                hidden_states = _gather_seq(hidden_states)
             return hidden_states
 
     # Replace forward method
