@@ -258,6 +258,54 @@ def build_tokenizer(cfg: TrainConfig):
     return tokenizer
 
 
+def apply_tensor_parallel(stage_model, tp_mesh):
+    """Apply tensor parallelism to Qwen2 transformer blocks within a PP stage."""
+    if tp_mesh.size() == 1:
+        return stage_model
+
+    try:
+        from torch.distributed.tensor.parallel import (
+            parallelize_module,
+            ColwiseParallel,
+            RowwiseParallel,
+        )
+    except Exception as exc:  # pragma: no cover - import depends on torch build
+        raise RuntimeError(
+            "Tensor parallel requires torch.distributed.tensor.parallel. "
+            "Please use a torch build with TP support."
+        ) from exc
+
+    for layer in getattr(stage_model.model, "layers", []):
+        if isinstance(layer, torch.nn.Identity):
+            continue
+
+        plan = {}
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None:
+            if hasattr(attn, "q_proj"):
+                plan["self_attn.q_proj"] = ColwiseParallel()
+            if hasattr(attn, "k_proj"):
+                plan["self_attn.k_proj"] = ColwiseParallel()
+            if hasattr(attn, "v_proj"):
+                plan["self_attn.v_proj"] = ColwiseParallel()
+            if hasattr(attn, "o_proj"):
+                plan["self_attn.o_proj"] = RowwiseParallel()
+
+        mlp = getattr(layer, "mlp", None)
+        if mlp is not None:
+            if hasattr(mlp, "gate_proj"):
+                plan["mlp.gate_proj"] = ColwiseParallel()
+            if hasattr(mlp, "up_proj"):
+                plan["mlp.up_proj"] = ColwiseParallel()
+            if hasattr(mlp, "down_proj"):
+                plan["mlp.down_proj"] = RowwiseParallel()
+
+        if plan:
+            parallelize_module(layer, tp_mesh, plan)
+
+    return stage_model
+
+
 # -----------------------------
 # Main Training Loop
 # -----------------------------
@@ -302,6 +350,7 @@ def main():
     
     # Parallelism
     parser.add_argument("--pp-size", type=int, default=1)
+    parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--micro-batches", type=int, default=1)
     parser.add_argument("--comm-timing", type=int, default=-1)
     parser.add_argument("--using-polar", type=bool, default=True)
@@ -390,11 +439,20 @@ def main():
     world_size = dist.get_world_size()
     
     pp_size = args.pp_size
-    assert world_size % pp_size == 0, f"world_size {world_size} must be divisible by PP_SIZE {pp_size}"
-    dp_size = world_size // pp_size
-    device_mesh = init_device_mesh("cuda", (dp_size, pp_size), mesh_dim_names=("dp", "pp"))
+    tp_size = args.tp_size
+    denom = pp_size * tp_size
+    assert world_size % denom == 0, (
+        f"world_size {world_size} must be divisible by PP_SIZE*TP_SIZE={denom}"
+    )
+    dp_size = world_size // denom
+    device_mesh = init_device_mesh(
+        "cuda",
+        (dp_size, pp_size, tp_size),
+        mesh_dim_names=("dp", "pp", "tp"),
+    )
     dp_mesh = device_mesh["dp"]
     pp_mesh = device_mesh["pp"]
+    tp_mesh = device_mesh["tp"]
 
     local_rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{local_rank}")
@@ -413,9 +471,12 @@ def main():
     
     # Partition model for pipeline parallelism
     stage_model = partition_qwen_model(model, stage_idx, pp_size)
+    stage_model = apply_tensor_parallel(stage_model, tp_mesh)
     
     dp_rank = dp_mesh.get_local_rank()
     print(f"DP rank: {dp_rank} / {dp_size}")
+    tp_rank = tp_mesh.get_local_rank()
+    print(f"TP rank: {tp_rank} / {tp_size}")
     
     # Get dataloader
     dataloader = get_dataloader(cfg, tokenizer, pp_size)
