@@ -5,10 +5,9 @@ import torch.distributed as dist
 from typing import List, Optional, Tuple
 
 try:
-    from torch.distributed.tensor import DTensor, distribute_tensor
+    from torch.distributed.tensor import DTensor
 except Exception:  # pragma: no cover - optional dependency in older torch
     DTensor = None
-    distribute_tensor = None
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -27,9 +26,12 @@ def _to_local(tensor: torch.Tensor) -> torch.Tensor:
 def _wrap_like(local_tensor: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
     if not _is_dtensor(ref_tensor):
         return local_tensor
-    if distribute_tensor is not None:
-        return distribute_tensor(local_tensor, ref_tensor.device_mesh, ref_tensor.placements)
-    return DTensor.from_local(local_tensor, ref_tensor.device_mesh, ref_tensor.placements)
+    return DTensor.from_local(
+        local_tensor,
+        ref_tensor.device_mesh,
+        ref_tensor.placements,
+        global_shape=ref_tensor.shape,
+    )
 
 
 class GpipeHook:
