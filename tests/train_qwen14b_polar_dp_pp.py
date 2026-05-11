@@ -303,6 +303,15 @@ def apply_tensor_parallel(stage_model, tp_mesh):
         if plan:
             parallelize_module(layer, tp_mesh, plan)
 
+    # Also shard embeddings / lm_head when present on this stage.
+    top_plan = {}
+    if getattr(stage_model.model, "embed_tokens", None) is not None:
+        top_plan["model.embed_tokens"] = RowwiseParallel()
+    if getattr(stage_model, "lm_head", None) is not None:
+        top_plan["lm_head"] = ColwiseParallel()
+    if top_plan:
+        parallelize_module(stage_model, tp_mesh, top_plan)
+
     return stage_model
 
 
@@ -472,6 +481,26 @@ def main():
     # Partition model for pipeline parallelism
     stage_model = partition_qwen_model(model, stage_idx, pp_size)
     stage_model = apply_tensor_parallel(stage_model, tp_mesh)
+
+    # Log TP status for a representative weight.
+    if dist.get_rank() == 0:
+        for layer in getattr(stage_model.model, "layers", []):
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and hasattr(attn, "q_proj"):
+                weight = attn.q_proj.weight
+                is_dtensor = weight.__class__.__name__ == "DTensor" or (
+                    weight.__class__.__module__.startswith("torch.distributed.tensor")
+                )
+                print(
+                    "[tp-debug] q_proj.weight "
+                    f"type={type(weight)} shape={getattr(weight, 'shape', None)} "
+                    f"is_dtensor={is_dtensor}"
+                )
+                if hasattr(weight, "placements"):
+                    print(f"[tp-debug] placements={weight.placements}")
+                if hasattr(weight, "device_mesh"):
+                    print(f"[tp-debug] device_mesh={weight.device_mesh}")
+                break
     
     dp_rank = dp_mesh.get_local_rank()
     print(f"DP rank: {dp_rank} / {dp_size}")

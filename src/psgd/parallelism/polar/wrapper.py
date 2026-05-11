@@ -563,7 +563,41 @@ class PolarParallel:
                 else:
                     self.schedule.step(attention_mask=attention_mask)
 
+                if self.optimizer and global_step == 0:
+                    try:
+                        summary = torch.cuda.memory_summary(
+                            device=self.device,
+                            abbreviated=True,
+                        )
+                        print(
+                            f"[mem] rank={dist.get_rank()} stage={self.stage_idx} "
+                            "before optimizer.step()\n"
+                            f"{summary}"
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[mem] rank={dist.get_rank()} stage={self.stage_idx} "
+                            f"before optimizer.step() failed: {exc}"
+                        )
+
                 self.optimizer.step()
+
+                if self.optimizer and global_step == 0:
+                    try:
+                        summary = torch.cuda.memory_summary(
+                            device=self.device,
+                            abbreviated=True,
+                        )
+                        print(
+                            f"[mem] rank={dist.get_rank()} stage={self.stage_idx} "
+                            "after optimizer.step()\n"
+                            f"{summary}"
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[mem] rank={dist.get_rank()} stage={self.stage_idx} "
+                            f"after optimizer.step() failed: {exc}"
+                        )
                 self.local_step_counter += 1
                 global_step += 1
 
