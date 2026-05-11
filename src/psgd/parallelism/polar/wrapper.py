@@ -283,11 +283,11 @@ class PolarParallel:
         self.optimizer_name = optimizer
         if optimizer == "adamw":
             self.optimizer = torch.optim.AdamW(
-                self.stage.submod.parameters(), lr=self.lr
+                self.stage.submod.parameters(), lr=self.lr, foreach=False
             )
         elif optimizer == "sgd":
             self.optimizer = torch.optim.SGD(
-                self.stage.submod.parameters(), lr=self.lr
+                self.stage.submod.parameters(), lr=self.lr, foreach=False
             )
 
         # dp_rank = self.dp_mesh.get_local_rank()
