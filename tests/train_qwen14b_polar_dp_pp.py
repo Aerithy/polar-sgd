@@ -185,7 +185,9 @@ def partition_qwen_model(
                         f"SP requires seq_len divisible by tp_size: {seq_len} % {tp_size} != 0"
                     )
                 local_len = seq_len // tp_size
-                hidden_states = hidden_states[:, tp_rank * local_len : (tp_rank + 1) * local_len]
+                hidden_states = hidden_states[
+                    :, tp_rank * local_len : (tp_rank + 1) * local_len
+                ].contiguous()
 
         def _gather_seq(local_hidden):
             if tp_size == 1:
@@ -238,7 +240,7 @@ def partition_qwen_model(
                     local_len = seq_len // tp_size
                     hidden_states = hidden_states[
                         :, tp_rank * local_len : (tp_rank + 1) * local_len
-                    ]
+                    ].contiguous()
 
         # Apply final norm if present
         if (hasattr(model, 'norm') and model.norm is not None) or (
