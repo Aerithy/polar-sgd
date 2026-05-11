@@ -105,7 +105,13 @@ def get_dataloader(
 # -----------------------------
 # Qwen Model Partitioning for Pipeline Parallelism
 # -----------------------------
-def partition_qwen_model(model, stage_idx: int, num_stages: int):
+def partition_qwen_model(
+    model,
+    stage_idx: int,
+    num_stages: int,
+    tp_mesh=None,
+    enable_sp: bool = False,
+):
     """
     Partition Qwen model for pipeline parallelism.
     - Keep only layers assigned to this stage
@@ -156,7 +162,7 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     rope_theta = getattr(config, 'rope_theta', 10000.0)
     max_position_embeddings = getattr(config, 'max_position_embeddings', 4096)
     
-    # Custom forward method for partitioned model with proper RoPE handling
+    # Custom forward method for partitioned model with optional SP and proper RoPE handling
     def custom_forward(input_ids_or_hidden, attention_mask=None):
         if model.model.embed_tokens is not None:
             # Stage 0: input is token IDs
@@ -165,35 +171,57 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
             # Stage 1+: input is hidden states
             hidden_states = input_ids_or_hidden
 
-        # Get sequence length for position embeddings
-        seq_length = hidden_states.shape[1]
-        
-        # Handle position embeddings for Qwen2 RoPE
-        position_embeddings = None
-        
-        # Create position_ids tensor with correct shape [batch_size, seq_length]
-        batch_size = hidden_states.shape[0]
-        position_ids = torch.arange(seq_length, device=hidden_states.device).unsqueeze(0).repeat(batch_size, 1)
-        
-        if hasattr(model.model, 'rotary_emb') and model.model.rotary_emb is not None:
-            position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
-        elif hasattr(original_model, 'rotary_emb') and original_model.rotary_emb is not None:
-            position_embeddings = original_model.rotary_emb(hidden_states, position_ids)
-        else:
-            # Fallback: create rotary embedding if not found
+        tp_size = 1
+        tp_rank = 0
+        tp_group = None
+        if enable_sp and tp_mesh is not None:
+            tp_size = tp_mesh.size()
+            tp_rank = tp_mesh.get_local_rank()
+            tp_group = tp_mesh.get_group()
+            if tp_size > 1:
+                seq_len = hidden_states.shape[1]
+                if seq_len % tp_size != 0:
+                    raise ValueError(
+                        f"SP requires seq_len divisible by tp_size: {seq_len} % {tp_size} != 0"
+                    )
+                local_len = seq_len // tp_size
+                hidden_states = hidden_states[:, tp_rank * local_len : (tp_rank + 1) * local_len]
+
+        def _gather_seq(local_hidden):
+            if tp_size == 1:
+                return local_hidden
+            gathered = [torch.empty_like(local_hidden) for _ in range(tp_size)]
+            dist.all_gather(gathered, local_hidden, group=tp_group)
+            return torch.cat(gathered, dim=1)
+
+        def _build_position_embeddings(full_hidden):
+            seq_length = full_hidden.shape[1]
+            batch_size = full_hidden.shape[0]
+            position_ids = (
+                torch.arange(seq_length, device=full_hidden.device)
+                .unsqueeze(0)
+                .repeat(batch_size, 1)
+            )
+            if hasattr(model.model, 'rotary_emb') and model.model.rotary_emb is not None:
+                return model.model.rotary_emb(full_hidden, position_ids)
+            if hasattr(original_model, 'rotary_emb') and original_model.rotary_emb is not None:
+                return original_model.rotary_emb(full_hidden, position_ids)
             from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
             rotary_emb = Qwen2RotaryEmbedding(
                 config.hidden_size // config.num_attention_heads,
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings
-            ).to(hidden_states.device)
-            position_embeddings = rotary_emb(hidden_states, position_ids)
+            ).to(full_hidden.device)
+            return rotary_emb(full_hidden, position_ids)
 
         # Pass through layers
         for layer in model.model.layers:
             if isinstance(layer, torch.nn.Identity):
                 hidden_states = layer(hidden_states)
             else:
+                if tp_size > 1:
+                    hidden_states = _gather_seq(hidden_states)
+                position_embeddings = _build_position_embeddings(hidden_states)
                 # Pass position_embeddings to Qwen2 layers
                 layer_outputs = layer(
                     hidden_states, 
@@ -205,15 +233,28 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
                     hidden_states = layer_outputs[0]
                 else:
                     hidden_states = layer_outputs
+                if tp_size > 1:
+                    seq_len = hidden_states.shape[1]
+                    local_len = seq_len // tp_size
+                    hidden_states = hidden_states[
+                        :, tp_rank * local_len : (tp_rank + 1) * local_len
+                    ]
 
         # Apply final norm if present
-        if hasattr(model, 'norm') and model.norm is not None:
-            hidden_states = model.norm(hidden_states)
-        elif hasattr(model.model, 'final_norm') and model.model.final_norm is not None:
-            hidden_states = model.model.final_norm(hidden_states)
+        if (hasattr(model, 'norm') and model.norm is not None) or (
+            hasattr(model.model, 'final_norm') and model.model.final_norm is not None
+        ):
+            if tp_size > 1:
+                hidden_states = _gather_seq(hidden_states)
+            if hasattr(model, 'norm') and model.norm is not None:
+                hidden_states = model.norm(hidden_states)
+            elif hasattr(model.model, 'final_norm') and model.model.final_norm is not None:
+                hidden_states = model.model.final_norm(hidden_states)
 
         # Apply lm_head if present
         if model.lm_head is not None:
+            if tp_size > 1:
+                hidden_states = _gather_seq(hidden_states)
             return model.lm_head(hidden_states)
         else:
             return hidden_states
@@ -351,6 +392,7 @@ def main():
     # Parallelism
     parser.add_argument("--pp-size", type=int, default=1)
     parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--enable-sp", action="store_true", default=False)
     parser.add_argument("--micro-batches", type=int, default=1)
     parser.add_argument("--comm-timing", type=int, default=-1)
     parser.add_argument("--using-polar", type=bool, default=True)
@@ -470,7 +512,13 @@ def main():
     print(f"Stage index: {stage_idx} / {pp_size}")
     
     # Partition model for pipeline parallelism
-    stage_model = partition_qwen_model(model, stage_idx, pp_size)
+    stage_model = partition_qwen_model(
+        model,
+        stage_idx,
+        pp_size,
+        tp_mesh=tp_mesh,
+        enable_sp=args.enable_sp,
+    )
     stage_model = apply_tensor_parallel(stage_model, tp_mesh)
     
     dp_rank = dp_mesh.get_local_rank()
