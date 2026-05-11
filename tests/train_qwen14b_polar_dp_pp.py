@@ -240,6 +240,8 @@ def build_qwen_model(cfg: TrainConfig):
     model = AutoModelForCausalLM.from_pretrained(cfg.model_name, **kwargs)
 
     if cfg.activation_checkpointing:
+        # Disable KV cache for gradient checkpointing correctness.
+        model.config.use_cache = False
         model.gradient_checkpointing_enable()
 
     return model
