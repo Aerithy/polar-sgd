@@ -4,10 +4,32 @@ import torch
 import torch.distributed as dist
 from typing import List, Optional, Tuple
 
+try:
+    from torch.distributed.tensor import DTensor, distribute_tensor
+except Exception:  # pragma: no cover - optional dependency in older torch
+    DTensor = None
+    distribute_tensor = None
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _is_dtensor(tensor: torch.Tensor) -> bool:
+    return DTensor is not None and isinstance(tensor, DTensor)
+
+
+def _to_local(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.to_local() if _is_dtensor(tensor) else tensor
+
+
+def _wrap_like(local_tensor: torch.Tensor, ref_tensor: torch.Tensor) -> torch.Tensor:
+    if not _is_dtensor(ref_tensor):
+        return local_tensor
+    if distribute_tensor is not None:
+        return distribute_tensor(local_tensor, ref_tensor.device_mesh, ref_tensor.placements)
+    return DTensor.from_local(local_tensor, ref_tensor.device_mesh, ref_tensor.placements)
 
 
 class GpipeHook:
@@ -48,8 +70,8 @@ class GpipeHook:
             if param.grad is not None:
                 # ✅ 累积梯度而不是直接赋值
                 if self.grads[i] is None:
-                    self.grads[i] = torch.zeros_like(param.grad)
-                self.grads[i].add_(param.grad)
+                    self.grads[i] = torch.zeros_like(_to_local(param.grad))
+                self.grads[i].add_(_to_local(param.grad))
         
         # trigger_condition = self.micro_batch_counter == (self.pp_local_rank 
         # + 1) * (self.micro_batch_size / self.pp_size) - 1
@@ -114,7 +136,8 @@ class GpipeHook:
                 if grad_pred is None:
                     param.grad = None
                 else:
-                    param.grad = grad_pred.detach().clone()
+                    local_grad = grad_pred.detach()
+                    param.grad = _wrap_like(local_grad, param)
             
             # ✅ 清零累积的梯度，为下一个周期做准备
             self.grads = [None for _ in self.grads]
@@ -212,10 +235,11 @@ class GpipeHook:
                 is_none.append(True)
             else:
                 is_none.append(False)
-                flattened = tensor.reshape(-1)
+                local_tensor = _to_local(tensor)
+                flattened = local_tensor.reshape(-1)
                 flattened_tensors.append(flattened)
                 tensor_numels.append(flattened.numel())
-                original_shapes.append(tensor.shape)
+                original_shapes.append(local_tensor.shape)
 
         if flattened_tensors:
             flattened = torch.cat(flattened_tensors)
@@ -515,13 +539,15 @@ class PolarGpipeIoOptimHook:
         for p in self.params:
             # By construction, grads_pred entries correspond 1:1 with params.
             self.is_none_mask.append(False)
-            n = p.numel()
+            n = _to_local(p).numel()
             self.tensor_numels.append(n)
-            self.original_shapes.append(p.shape)
+            self.original_shapes.append(_to_local(p).shape)
             total_numel += int(n)
 
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        ref_param = next(self.model.parameters())
+        local_ref = _to_local(ref_param)
+        dev = local_ref.device
+        dtype = local_ref.dtype
         # One reusable flat buffer for predicted grads
         self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
 
@@ -553,9 +579,7 @@ class PolarGpipeIoOptimHook:
 
             # p_pred = g * scale + e
             # Write into flat buffer directly.
-            self.flat_pred[offset: offset + n].copy_(
-                (g * scale + e).reshape(-1)
-            )
+            self.flat_pred[offset: offset + n].copy_((g * scale + e).reshape(-1))
             offset += n
 
             # Keep grads_pred logical view for compatibility/debug
@@ -573,9 +597,15 @@ class PolarGpipeIoOptimHook:
                 continue
 
             # Ensure grad tensor exists; then copy into it.
-            if p.grad is None or p.grad.numel() != n:
-                p.grad = torch.empty_like(p)
-            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            local_grad = self.flat_pred[offset: offset + n].view(
+                self.original_shapes[i]
+            )
+            if _is_dtensor(p):
+                p.grad = _wrap_like(local_grad, p)
+            else:
+                if p.grad is None or p.grad.numel() != n:
+                    p.grad = torch.empty_like(p)
+                p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
             offset += n
 
     def __call__(self, *args, **kwds):
@@ -584,8 +614,8 @@ class PolarGpipeIoOptimHook:
             if p.grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(_to_local(p.grad))
+            self.grads[i].add_(_to_local(p.grad))
 
         if self._trigger_condition():
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
@@ -813,12 +843,16 @@ class PolarGpipeMomentumExtrapHook:
         ]
 
         # Precompute flatten layout
-        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
-        self.original_shapes: List[torch.Size] = [p.shape for p in self.params]
+        self.tensor_numels: List[int] = [int(_to_local(p).numel()) for p in self.params]
+        self.original_shapes: List[torch.Size] = [
+            _to_local(p).shape for p in self.params
+        ]
         total_numel = int(sum(self.tensor_numels))
 
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        ref_param = next(self.model.parameters())
+        local_ref = _to_local(ref_param)
+        dev = local_ref.device
+        dtype = local_ref.dtype
         self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
 
     def _trigger_condition(self) -> bool:
@@ -866,9 +900,15 @@ class PolarGpipeMomentumExtrapHook:
                 p.grad = None
                 offset += n
                 continue
-            if p.grad is None or p.grad.numel() != n:
-                p.grad = torch.empty_like(p)
-            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            local_grad = self.flat_pred[offset: offset + n].view(
+                self.original_shapes[i]
+            )
+            if _is_dtensor(p):
+                p.grad = _wrap_like(local_grad, p)
+            else:
+                if p.grad is None or p.grad.numel() != n:
+                    p.grad = torch.empty_like(p)
+                p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
             offset += n
 
     def __call__(self, *args, **kwds):
@@ -877,8 +917,8 @@ class PolarGpipeMomentumExtrapHook:
             if p.grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(_to_local(p.grad))
+            self.grads[i].add_(_to_local(p.grad))
 
         if self._trigger_condition():
             # No scaling here; prediction uses momentum/EMA.
@@ -961,10 +1001,12 @@ class PolarGpipeErrorFeedbackOnlyHook:
             p for p in self.model.parameters()
         ]
         # Flatten layout + reusable flat buffer
-        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        self.tensor_numels: List[int] = [int(_to_local(p).numel()) for p in self.params]
         total_numel = int(sum(self.tensor_numels))
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        ref_param = next(self.model.parameters())
+        local_ref = _to_local(ref_param)
+        dev = local_ref.device
+        dtype = local_ref.dtype
         self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
 
     def _trigger_condition(self) -> bool:
@@ -1002,9 +1044,15 @@ class PolarGpipeErrorFeedbackOnlyHook:
                 p.grad = None
                 offset += n
                 continue
-            if p.grad is None or p.grad.numel() != n:
-                p.grad = torch.empty_like(p)
-            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            local_grad = self.flat_pred[offset: offset + n].view(
+                _to_local(p).shape
+            )
+            if _is_dtensor(p):
+                p.grad = _wrap_like(local_grad, p)
+            else:
+                if p.grad is None or p.grad.numel() != n:
+                    p.grad = torch.empty_like(p)
+                p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
             offset += n
 
     def __call__(self, *args, **kwds):
@@ -1013,8 +1061,8 @@ class PolarGpipeErrorFeedbackOnlyHook:
             if p.grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(_to_local(p.grad))
+            self.grads[i].add_(_to_local(p.grad))
 
         if self._trigger_condition():
             self._pack_predicted_()
@@ -1087,10 +1135,12 @@ class PolarGpipeScalingOnlyHook:
             p for p in self.model.parameters()
         ]
         # Flatten layout + reusable flat buffer
-        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        self.tensor_numels: List[int] = [int(_to_local(p).numel()) for p in self.params]
         total_numel = int(sum(self.tensor_numels))
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        ref_param = next(self.model.parameters())
+        local_ref = _to_local(ref_param)
+        dev = local_ref.device
+        dtype = local_ref.dtype
         self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
 
     def _trigger_condition(self) -> bool:
@@ -1123,9 +1173,15 @@ class PolarGpipeScalingOnlyHook:
                 p.grad = None
                 offset += n
                 continue
-            if p.grad is None or p.grad.numel() != n:
-                p.grad = torch.empty_like(p)
-            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            local_grad = self.flat_pred[offset: offset + n].view(
+                _to_local(p).shape
+            )
+            if _is_dtensor(p):
+                p.grad = _wrap_like(local_grad, p)
+            else:
+                if p.grad is None or p.grad.numel() != n:
+                    p.grad = torch.empty_like(p)
+                p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
             offset += n
 
     def __call__(self, *args, **kwds):
@@ -1134,8 +1190,8 @@ class PolarGpipeScalingOnlyHook:
             if p.grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(_to_local(p.grad))
+            self.grads[i].add_(_to_local(p.grad))
 
         if self._trigger_condition():
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
@@ -1206,10 +1262,12 @@ class PolarGpipeNothingHook:
             p for p in self.model.parameters()
         ]
         # Flatten layout + reusable flat buffer
-        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        self.tensor_numels: List[int] = [int(_to_local(p).numel()) for p in self.params]
         total_numel = int(sum(self.tensor_numels))
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        ref_param = next(self.model.parameters())
+        local_ref = _to_local(ref_param)
+        dev = local_ref.device
+        dtype = local_ref.dtype
         self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
 
     def _trigger_condition(self) -> bool:
@@ -1241,9 +1299,15 @@ class PolarGpipeNothingHook:
                 p.grad = None
                 offset += n
                 continue
-            if p.grad is None or p.grad.numel() != n:
-                p.grad = torch.empty_like(p)
-            p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
+            local_grad = self.flat_pred[offset: offset + n].view(
+                _to_local(p).shape
+            )
+            if _is_dtensor(p):
+                p.grad = _wrap_like(local_grad, p)
+            else:
+                if p.grad is None or p.grad.numel() != n:
+                    p.grad = torch.empty_like(p)
+                p.grad.view(-1).copy_(self.flat_pred[offset: offset + n])
             offset += n
 
     def __call__(self, *args, **kwds):
@@ -1252,8 +1316,8 @@ class PolarGpipeNothingHook:
             if p.grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(_to_local(p.grad))
+            self.grads[i].add_(_to_local(p.grad))
 
         if self._trigger_condition():
             self._pack_predicted_()
