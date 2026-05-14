@@ -118,7 +118,9 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
 
         while idx < len(layer_param_sizes):
             remaining_layers = len(layers) - idx
-            if partition and remaining_layers <= remaining_partitions - 1:
+            remaining_after = remaining_partitions - 1
+            # Keep enough layers to assign at least one per remaining partition.
+            if partition and remaining_layers <= remaining_after:
                 break
             next_size = layer_param_sizes[idx]
             if partition and partition_size + next_size > target_size:
@@ -193,7 +195,7 @@ def main():
         sampler=sampler,
         shuffle=(sampler is None),
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
         drop_last=True,
         collate_fn=collate_fn,
     )
@@ -202,8 +204,9 @@ def main():
         if sampler is not None:
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
-        step = 0
+        completed_steps = 0
         for step, (images, targets) in enumerate(train_loader, start=1):
+            completed_steps = step
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
@@ -213,9 +216,9 @@ def main():
             optimizer.zero_grad()
             loss = compute_loss(model, images, targets)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=args.clip_norm)
             if not args.using_hook:
                 sync_gradients(parameters, world_size)
-            torch.nn.utils.clip_grad_norm_(parameters, max_norm=args.clip_norm)
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -228,7 +231,6 @@ def main():
                     loss.item(),
                 )
 
-        completed_steps = step
         if completed_steps > 0:
             avg_loss = epoch_loss / completed_steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
