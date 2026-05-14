@@ -84,6 +84,8 @@ def compute_loss(model, images, targets):
 
 def get_leaf_layers(module: torch.nn.Module):
     for child in module.modules():
+        if child is module:
+            continue
         if list(child.children()):
             continue
         if any(p.requires_grad for p in child.parameters(recurse=False)):
@@ -114,22 +116,19 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
         partition = []
         partition_size = 0
 
-        partition.append(layers[idx])
-        partition_size += layer_param_sizes[idx]
-        idx += 1
-
         while idx < len(layer_param_sizes):
             remaining_layers = len(layers) - idx
-            if remaining_layers <= remaining_partitions - 1:
+            if partition and remaining_layers <= remaining_partitions - 1:
                 break
             next_size = layer_param_sizes[idx]
-            if partition_size + next_size > target_size:
+            if partition and partition_size + next_size > target_size:
                 break
-            partition_size += next_size
             partition.append(layers[idx])
+            partition_size += next_size
             idx += 1
 
-        partitions.append(partition)
+        if partition:
+            partitions.append(partition)
 
     return partitions
 
@@ -229,9 +228,9 @@ def main():
                     loss.item(),
                 )
 
-        total_steps = step
-        if total_steps > 0:
-            avg_loss = epoch_loss / total_steps
+        completed_steps = step
+        if completed_steps > 0:
+            avg_loss = epoch_loss / completed_steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
         else:
             logger.warning("Epoch %s finished with no training steps.", epoch + 1)
