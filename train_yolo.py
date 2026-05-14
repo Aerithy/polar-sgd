@@ -133,7 +133,8 @@ def main():
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
         steps = 0
-        for steps, (images, targets) in enumerate(train_loader, start=1):
+        for step, (images, targets) in enumerate(train_loader, start=1):
+            steps = step
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
