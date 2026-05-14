@@ -114,12 +114,13 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
             partition.append(layers[idx])
             idx += 1
 
-        if idx == len(layer_param_sizes):
+        if idx >= len(layer_param_sizes):
             partitions.append(partition)
             break
 
+        next_size = layer_param_sizes[idx]
         if abs(partition_size - target_size) < abs(
-            partition_size + layer_param_sizes[idx] - target_size
+            partition_size + next_size - target_size
         ):
             partitions.append(partition)
         else:
@@ -150,7 +151,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--log_interval", type=int, default=10)
-    parser.add_argument("--using_hook", type=bool, default=False)
+    parser.add_argument("--using_hook", action="store_true")
     parser.add_argument("--local_steps", type=int, default=2)
     parser.add_argument("--clip_norm", type=float, default=0.5)
     args = parser.parse_args()
@@ -199,8 +200,9 @@ def main():
         if sampler is not None:
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
-        step = -1
-        for step, (images, targets) in enumerate(train_loader):
+        steps = 0
+        for step, (images, targets) in enumerate(train_loader, start=1):
+            steps = step
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
@@ -216,16 +218,15 @@ def main():
             optimizer.step()
 
             epoch_loss += loss.item()
-            if (step + 1) % args.log_interval == 0:
+            if step % args.log_interval == 0:
                 logger.info(
                     "Epoch %s Step %s/%s - loss: %.4f",
                     epoch + 1,
-                    step + 1,
+                    step,
                     len(train_loader),
                     loss.item(),
                 )
 
-        steps = step + 1
         if steps > 0:
             avg_loss = epoch_loss / steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
