@@ -102,7 +102,7 @@ def main():
 
     set_seed(args.seed)
 
-    _, inter_group, local_group = process_group_setup()
+    process_group_setup()
     world_size = dist.get_world_size() if dist.is_initialized() else 1
 
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -132,7 +132,9 @@ def main():
         if sampler is not None:
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
+        step_count = 0
         for step, (images, targets) in enumerate(train_loader, start=1):
+            step_count += 1
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
@@ -158,7 +160,7 @@ def main():
         logger.info(
             "Epoch %s finished. avg loss: %.4f",
             epoch + 1,
-            epoch_loss / max(1, len(train_loader)),
+            epoch_loss / max(1, step_count),
         )
 
 
