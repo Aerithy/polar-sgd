@@ -84,7 +84,7 @@ def compute_loss(model, images, targets):
 
 def get_leaf_layers(module: torch.nn.Module):
     for child in module.modules():
-        if list(child.children()):
+        if next(child.children(), None) is not None:
             continue
         if any(p.requires_grad for p in child.parameters(recurse=False)):
             yield child
@@ -101,32 +101,36 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
     layer_param_sizes = [
         sum(p.numel() for p in layer.parameters() if p.requires_grad) for layer in layers
     ]
-    total_params = sum(layer_param_sizes)
-    target_size = total_params / num_partitions
-
     partitions = []
     idx = 0
-    while idx < len(layer_param_sizes):
+    for partition_idx in range(num_partitions):
+        remaining_layers = len(layers) - idx
+        remaining_partitions = num_partitions - partition_idx
+        if remaining_layers <= 0:
+            break
+
+        if remaining_layers == remaining_partitions:
+            partitions.append([layers[idx]])
+            idx += 1
+            continue
+
+        remaining_params = sum(layer_param_sizes[idx:])
+        target_size = remaining_params / remaining_partitions
         partition = []
         partition_size = 0
-        while partition_size < target_size and idx < len(layer_param_sizes):
+        while idx < len(layer_param_sizes) and (
+            partition_size < target_size or not partition
+        ):
             partition_size += layer_param_sizes[idx]
             partition.append(layers[idx])
             idx += 1
 
-        if idx >= len(layer_param_sizes):
-            partitions.append(partition)
-            break
+            remaining_layers = len(layers) - idx
+            remaining_partitions = num_partitions - partition_idx - 1
+            if remaining_layers == remaining_partitions:
+                break
 
-        next_size = layer_param_sizes[idx]
-        if abs(partition_size - target_size) < abs(
-            partition_size + next_size - target_size
-        ):
-            partitions.append(partition)
-        else:
-            partition.append(layers[idx])
-            partitions.append(partition)
-            idx += 1
+        partitions.append(partition)
 
     return partitions
 
@@ -200,9 +204,8 @@ def main():
         if sampler is not None:
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
-        steps = 0
+        step = 0
         for step, (images, targets) in enumerate(train_loader, start=1):
-            steps = step
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
@@ -227,6 +230,7 @@ def main():
                     loss.item(),
                 )
 
+        steps = step
         if steps > 0:
             avg_loss = epoch_loss / steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
