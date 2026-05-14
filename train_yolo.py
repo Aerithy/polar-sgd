@@ -104,30 +104,30 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
         sum(p.numel() for p in layer.parameters() if p.requires_grad) for layer in layers
     ]
     partitions = []
-    idx = 0
-    for partition_idx in range(num_partitions):
-        remaining_layers = len(layers) - idx
-        remaining_partitions = num_partitions - partition_idx
+    layer_idx = 0
+    for partition_index in range(num_partitions):
+        remaining_layers = len(layers) - layer_idx
+        remaining_partitions = num_partitions - partition_index
         if remaining_layers <= 0:
             break
 
-        remaining_params = sum(layer_param_sizes[idx:])
+        remaining_params = sum(layer_param_sizes[layer_idx:])
         target_size = remaining_params / remaining_partitions
         partition = []
         partition_size = 0
 
-        while idx < len(layer_param_sizes):
-            remaining_layers = len(layers) - idx
+        while layer_idx < len(layer_param_sizes):
+            remaining_layers_in_loop = len(layers) - layer_idx
             remaining_after = remaining_partitions - 1
             # Keep enough layers to assign at least one per remaining partition.
-            if partition and remaining_layers <= remaining_after:
+            if partition and remaining_layers_in_loop <= remaining_after:
                 break
-            next_size = layer_param_sizes[idx]
+            next_size = layer_param_sizes[layer_idx]
             if partition and partition_size + next_size > target_size:
                 break
-            partition.append(layers[idx])
+            partition.append(layers[layer_idx])
             partition_size += next_size
-            idx += 1
+            layer_idx += 1
 
         if partition:
             partitions.append(partition)
@@ -156,7 +156,13 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--using_hook", action="store_true")
-    parser.add_argument("--local_steps", type=int, default=2)
+    parser.add_argument(
+        "--local_steps",
+        type=int,
+        default=2,
+        help="Deprecated: use --num_partitions to control layer partitions.",
+    )
+    parser.add_argument("--num_partitions", type=int, default=None)
     parser.add_argument("--clip_norm", type=float, default=0.5)
     args = parser.parse_args()
 
@@ -179,9 +185,8 @@ def main():
     if args.using_hook:
         if not torch.cuda.is_available():
             raise RuntimeError("using_hook requires CUDA.")
-        partitions = split_model_into_partitions(
-            get_torch_model(model), args.local_steps
-        )
+        num_partitions = args.num_partitions or args.local_steps
+        partitions = split_model_into_partitions(get_torch_model(model), num_partitions)
         gradient_collector = NativePolarGradientCollector(
             inter_group=inter_group, local_group=local_group, partitions=partitions
         )
@@ -231,11 +236,11 @@ def main():
                     loss.item(),
                 )
 
-        if completed_steps > 0:
+        if len(train_loader) == 0:
+            logger.warning("Epoch %s finished with no training steps.", epoch + 1)
+        else:
             avg_loss = epoch_loss / completed_steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
-        else:
-            logger.warning("Epoch %s finished with no training steps.", epoch + 1)
 
 
 if __name__ == "__main__":
