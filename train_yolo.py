@@ -102,8 +102,8 @@ def main():
 
     set_seed(args.seed)
 
-    process_group_setup()
-    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    global_group, _, _ = process_group_setup()
+    world_size = dist.get_world_size(global_group) if dist.is_initialized() else 1
 
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -157,11 +157,11 @@ def main():
                     loss.item(),
                 )
 
-        logger.info(
-            "Epoch %s finished. avg loss: %.4f",
-            epoch + 1,
-            epoch_loss / max(1, step_count),
-        )
+        if step_count:
+            avg_loss = epoch_loss / step_count
+            logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
+        else:
+            logger.warning("Epoch %s finished with no training steps.", epoch + 1)
 
 
 if __name__ == "__main__":
