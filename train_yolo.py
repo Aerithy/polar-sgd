@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchvision.datasets import CocoDetection
 from torchvision.transforms import Compose, Normalize, ToTensor
 
-from polar_trainer import process_group_setup
+from polar_trainer import NativePolarGradientCollector, process_group_setup
 from utils.seed import set_seed
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,10 @@ def get_model_parameters(model):
     return model.parameters()
 
 
+def get_torch_model(model):
+    return model.model if hasattr(model, "model") else model
+
+
 def compute_loss(model, images, targets):
     if hasattr(model, "model") and hasattr(model.model, "loss"):
         preds = model.model(images)
@@ -76,6 +80,54 @@ def compute_loss(model, images, targets):
     if torch.is_tensor(output):
         return output
     raise RuntimeError("Unsupported YOLO output format; adjust compute_loss().")
+
+
+def get_leaf_layers(module: torch.nn.Module):
+    for child in module.modules():
+        if list(child.children()):
+            continue
+        if any(p.requires_grad for p in child.parameters(recurse=False)):
+            yield child
+
+
+def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
+    layers = list(get_leaf_layers(module))
+    if not layers:
+        raise RuntimeError("Unable to find trainable layers for partitioning.")
+
+    if num_partitions <= 1:
+        return [layers]
+
+    layer_param_sizes = [
+        sum(p.numel() for p in layer.parameters() if p.requires_grad) for layer in layers
+    ]
+    total_params = sum(layer_param_sizes)
+    target_size = total_params / num_partitions
+
+    partitions = []
+    idx = 0
+    while idx < len(layer_param_sizes):
+        partition = []
+        partition_size = 0
+        while partition_size < target_size and idx < len(layer_param_sizes):
+            partition_size += layer_param_sizes[idx]
+            partition.append(layers[idx])
+            idx += 1
+
+        if idx == len(layer_param_sizes):
+            partitions.append(partition)
+            break
+
+        if abs(partition_size - target_size) < abs(
+            partition_size + layer_param_sizes[idx] - target_size
+        ):
+            partitions.append(partition)
+        else:
+            partition.append(layers[idx])
+            partitions.append(partition)
+            idx += 1
+
+    return partitions
 
 
 def sync_gradients(parameters, world_size: int):
@@ -98,11 +150,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--log_interval", type=int, default=10)
+    parser.add_argument("--using_hook", type=bool, default=False)
+    parser.add_argument("--local_steps", type=int, default=2)
+    parser.add_argument("--clip_norm", type=float, default=0.5)
     args = parser.parse_args()
 
     set_seed(args.seed)
 
-    global_group, _inter_group, _local_group = process_group_setup()
+    global_group, inter_group, local_group = process_group_setup()
     world_size = dist.get_world_size(global_group) if dist.is_initialized() else 1
 
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -114,6 +169,18 @@ def main():
     model = create_yolo_model(args.weights, device)
     parameters = list(get_model_parameters(model))
     optimizer = torch.optim.AdamW(parameters, lr=args.lr)
+
+    gradient_collector = None
+    if args.using_hook:
+        if not torch.cuda.is_available():
+            raise RuntimeError("using_hook requires CUDA.")
+        partitions = split_model_into_partitions(
+            get_torch_model(model), args.local_steps
+        )
+        gradient_collector = NativePolarGradientCollector(
+            inter_group=inter_group, local_group=local_group, partitions=partitions
+        )
+        gradient_collector.register_hook()
 
     train_dataset = build_coco_dataset(args.data_root, args.year, "train")
     sampler = DistributedSampler(train_dataset) if world_size > 1 else None
@@ -143,7 +210,9 @@ def main():
             optimizer.zero_grad()
             loss = compute_loss(model, images, targets)
             loss.backward()
-            sync_gradients(parameters, world_size)
+            if not args.using_hook:
+                sync_gradients(parameters, world_size)
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=args.clip_norm)
             optimizer.step()
 
             epoch_loss += loss.item()
