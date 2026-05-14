@@ -84,7 +84,7 @@ def compute_loss(model, images, targets):
 
 def get_leaf_layers(module: torch.nn.Module):
     for child in module.modules():
-        if next(child.children(), None) is not None:
+        if list(child.children()):
             continue
         if any(p.requires_grad for p in child.parameters(recurse=False)):
             yield child
@@ -109,26 +109,25 @@ def split_model_into_partitions(module: torch.nn.Module, num_partitions: int):
         if remaining_layers <= 0:
             break
 
-        if remaining_layers == remaining_partitions:
-            partitions.append([layers[idx]])
-            idx += 1
-            continue
-
         remaining_params = sum(layer_param_sizes[idx:])
         target_size = remaining_params / remaining_partitions
         partition = []
         partition_size = 0
-        while idx < len(layer_param_sizes) and (
-            partition_size < target_size or not partition
-        ):
-            partition_size += layer_param_sizes[idx]
+
+        partition.append(layers[idx])
+        partition_size += layer_param_sizes[idx]
+        idx += 1
+
+        while idx < len(layer_param_sizes):
+            remaining_layers = len(layers) - idx
+            if remaining_layers <= remaining_partitions - 1:
+                break
+            next_size = layer_param_sizes[idx]
+            if partition_size + next_size > target_size:
+                break
+            partition_size += next_size
             partition.append(layers[idx])
             idx += 1
-
-            remaining_layers = len(layers) - idx
-            remaining_partitions = num_partitions - partition_idx - 1
-            if remaining_layers == remaining_partitions:
-                break
 
         partitions.append(partition)
 
@@ -230,9 +229,9 @@ def main():
                     loss.item(),
                 )
 
-        steps = step
-        if steps > 0:
-            avg_loss = epoch_loss / steps
+        total_steps = step
+        if total_steps > 0:
+            avg_loss = epoch_loss / total_steps
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
         else:
             logger.warning("Epoch %s finished with no training steps.", epoch + 1)
