@@ -132,9 +132,8 @@ def main():
         if sampler is not None:
             sampler.set_epoch(epoch)
         epoch_loss = 0.0
-        step_count = 0
+        step = 0
         for step, (images, targets) in enumerate(train_loader, start=1):
-            step_count += 1
             images = [img.to(device) for img in images]
             targets = [
                 {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()}
@@ -157,8 +156,8 @@ def main():
                     loss.item(),
                 )
 
-        if step_count:
-            avg_loss = epoch_loss / step_count
+        if step:
+            avg_loss = epoch_loss / step
             logger.info("Epoch %s finished. avg loss: %.4f", epoch + 1, avg_loss)
         else:
             logger.warning("Epoch %s finished with no training steps.", epoch + 1)
