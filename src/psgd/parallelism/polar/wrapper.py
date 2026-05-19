@@ -314,6 +314,14 @@ class PolarParallel:
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
 
+    def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
+        for p in module.parameters():
+            if p.grad is None:
+                continue
+            if not torch.isfinite(p.grad).all():
+                return True
+        return False
+
     def _sync_parameters_local_sgd(self):
         """
         Synchronize model parameters across DP group (for Local-SGD).
@@ -518,6 +526,7 @@ class PolarParallel:
             pbar = self.dataloader
 
         max_steps = getattr(self.args, "max_steps", None)
+        grad_clip_norm = float(getattr(self.args, "grad_clip_norm", 1.0))
 
         with torch.profiler.profile(
             activities=[
@@ -562,6 +571,21 @@ class PolarParallel:
                         print(f"Step {global_step}, Loss: {loss.item():.4f}")
                 else:
                     self.schedule.step(attention_mask=attention_mask)
+
+                if self._has_nonfinite_grads(self.stage.submod):
+                    if self.optimizer:
+                        self.optimizer.zero_grad(set_to_none=True)
+                    if self.stage.is_last:
+                        print(f"[warn] non-finite gradients at step {global_step}; skip optimizer step")
+                    global_step += 1
+                    prof.step()
+                    continue
+
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.stage.submod.parameters(),
+                        max_norm=grad_clip_norm,
+                    )
 
                 self.optimizer.step()
                 self.local_step_counter += 1
@@ -729,6 +753,7 @@ class PolarParallel:
             pbar = self.dataloader
 
         max_steps = getattr(self.args, "max_steps", None)
+        grad_clip_norm = float(getattr(self.args, "grad_clip_norm", 1.0))
 
         # Baseline logging layout: 
         # ./log/baseline_{mode}/.../{dp_local_rank}/tb_{scalars,trace}
@@ -793,6 +818,20 @@ class PolarParallel:
                 # In manual baseline, DP-sync gradients explicitly.
                 if self.baseline_mode == "manual":
                     self._allreduce_dp_grads_()
+
+                if self._has_nonfinite_grads(stage_mod):
+                    optimizer.zero_grad(set_to_none=True)
+                    if baseline_stage.is_last:
+                        print(f"[warn] non-finite gradients at step {global_step}; skip optimizer step")
+                    global_step += 1
+                    prof.step()
+                    continue
+
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        stage_mod.parameters(),
+                        max_norm=grad_clip_norm,
+                    )
 
                 optimizer.step()
                 global_step += 1
