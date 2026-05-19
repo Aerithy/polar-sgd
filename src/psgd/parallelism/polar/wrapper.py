@@ -389,20 +389,18 @@ class PolarParallel:
                     input_ids,
                     attention_mask=attention_mask,
                 )
-                logits = out.logits
+                logits = out.logits if hasattr(out, "logits") else out
 
-                # LM loss, ignore pad (0)
-                shift_logits = logits[..., :-1, :]
-                shift_labels = labels[..., 1:]
-                valid = shift_labels.ne(0)
+                # LM loss, ignore masked labels (-100)
+                valid = labels.ne(-100)
                 n_tokens = valid.sum()
                 if n_tokens.item() > 0:
                     import torch.nn.functional as F
 
                     loss = F.cross_entropy(
-                        shift_logits.reshape(-1, shift_logits.size(-1)),
-                        shift_labels.reshape(-1),
-                        ignore_index=0,
+                        logits.reshape(-1, logits.size(-1)),
+                        labels.reshape(-1),
+                        ignore_index=-100,
                         reduction="mean",
                     )
                     total_loss_times_tokens += loss * n_tokens.float()
@@ -732,12 +730,10 @@ class PolarParallel:
         def loss_fn(output, target):
             """Memory-optimized LM loss (avoid contiguous huge temps)."""
             import torch.nn.functional as F
-            logits = output[..., :-1, :]
-            labels = target[..., 1:]
             return F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                labels.reshape(-1),
-                ignore_index=0,
+                output.reshape(-1, output.size(-1)),
+                target.reshape(-1),
+                ignore_index=-100,
             )
 
         schedule = Schedule1F1B(
