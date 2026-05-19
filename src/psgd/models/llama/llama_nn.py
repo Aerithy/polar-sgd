@@ -24,6 +24,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.weight)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(norm + self.eps)
@@ -91,6 +94,7 @@ class LlamaAttention(nn.Module):
 
         scale = 1.0 / math.sqrt(self.head_dim)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+        attn_scores = attn_scores.float()
 
         # Causal mask
         causal_mask = torch.full((T, T), float("-inf"), device=x.device, dtype=attn_scores.dtype).triu(1)
@@ -98,10 +102,12 @@ class LlamaAttention(nn.Module):
 
         # Optional padding mask (assumed consistent across stages)
         if attention_mask is not None:
-            mask = (1.0 - attention_mask.float()) * torch.finfo(x.dtype).min
+            mask = (1.0 - attention_mask.float()) * torch.finfo(attn_scores.dtype).min
             attn_scores = attn_scores + mask[:, None, None, :]
 
-        attn = torch.softmax(attn_scores, dim=-1).to(v.dtype)
+        attn = torch.softmax(attn_scores, dim=-1)
+        # Fully masked rows can produce NaN in softmax; zero them out.
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0).to(v.dtype)
         out = torch.matmul(attn, v)
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.o_proj(out)
@@ -154,7 +160,7 @@ class LlamaModel(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
 

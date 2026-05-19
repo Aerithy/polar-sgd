@@ -42,6 +42,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+POLAR_WRAPPER_FIX_VERSION = "llama_init_broadcast_debug_v1"
+
 
 class NativePolarGradientCollector:
     """
@@ -244,11 +246,11 @@ class PolarParallel:
         stage_idx = self.pp_mesh.get_local_rank()
         self.stage_idx = stage_idx
         self.stage_model = stage_model
+        self._is_llama_stage = "Llama" in type(self.stage_model).__name__
         self.stage_model.to_empty(device=self.device, recurse=True)
-        self.stage_model.apply(
-            lambda m: m.reset_parameters()
-            if hasattr(m, 'reset_parameters') else None
-        )
+        self.stage_model.apply(self._reset_module_parameters)
+        self._broadcast_stage_parameters_from_dp_root()
+        self._debug_check_stage_parameters("after_init")
 
         self.stage = PipelineStage(
             self.stage_model,
@@ -307,12 +309,117 @@ class PolarParallel:
             f"[PolarParallel:init] optimizer={optimizer} lr={self.lr} "
             f"baseline_mode={self.baseline_mode} use_local_sgd={self.use_local_sgd}"
         )
+        print(
+            f"[PolarParallel] version={POLAR_WRAPPER_FIX_VERSION} "
+            f"rank={dist.get_rank()} stage={self.stage_idx}",
+            flush=True,
+        )
 
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
+
+    def _debug_enabled(self) -> bool:
+        return int(getattr(self.args, "debug_nan_steps", 0) or 0) > 0
+
+    def _debug_check_stage_parameters(self, where: str) -> None:
+        if not self._debug_enabled():
+            return
+
+        total = 0
+        nonfinite = 0
+        max_abs = 0.0
+        first_bad = None
+        for name, param in self.stage_model.named_parameters():
+            total += param.numel()
+            finite = torch.isfinite(param).all()
+            if not bool(finite.item()):
+                bad_count = int((~torch.isfinite(param)).sum().item())
+                nonfinite += bad_count
+                if first_bad is None:
+                    first_bad = name
+            if param.numel() > 0:
+                max_abs = max(max_abs, float(param.detach().nan_to_num().abs().max().item()))
+
+        print(
+            f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
+            f"{where} params_total={total} nonfinite_params={nonfinite} "
+            f"max_abs={max_abs:.6g} first_bad={first_bad}",
+            flush=True,
+        )
+
+    def _debug_batch(self, batch_idx: int, input_ids, labels, attention_mask) -> None:
+        debug_steps = int(getattr(self.args, "debug_nan_steps", 0) or 0)
+        if batch_idx >= debug_steps:
+            return
+
+        rank = dist.get_rank()
+        input_min = int(input_ids.min().item()) if input_ids.numel() else -1
+        input_max = int(input_ids.max().item()) if input_ids.numel() else -1
+        mask_sum = int(attention_mask.sum().item()) if attention_mask is not None else -1
+        if labels is None:
+            valid_labels = -1
+            label_min = -1
+            label_max = -1
+        else:
+            valid = labels.ne(-100)
+            valid_labels = int(valid.sum().item())
+            if valid_labels > 0:
+                label_min = int(labels[valid].min().item())
+                label_max = int(labels[valid].max().item())
+            else:
+                label_min = -1
+                label_max = -1
+
+        print(
+            f"[debug_nan][rank {rank}][stage {self.stage_idx}] "
+            f"batch={batch_idx} input_range=[{input_min},{input_max}] "
+            f"mask_sum={mask_sum} valid_labels={valid_labels} "
+            f"label_range=[{label_min},{label_max}]",
+            flush=True,
+        )
+
+    def _reset_module_parameters(self, module: torch.nn.Module) -> None:
+        if self._is_llama_stage:
+            if isinstance(module, torch.nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+                return
+            if isinstance(module, torch.nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                return
+            if module.__class__.__name__ == "RMSNorm" and hasattr(module, "weight"):
+                torch.nn.init.ones_(module.weight)
+                return
+
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+
+        # Some custom modules own parameters but do not implement reset_parameters.
+        # After to_empty(), those parameters contain arbitrary device memory.
+        if module.__class__.__name__ == "RMSNorm" and hasattr(module, "weight"):
+            torch.nn.init.ones_(module.weight)
+
+    @torch.no_grad()
+    def _broadcast_stage_parameters_from_dp_root(self) -> None:
+        """Make DP replicas of the same pipeline stage start identically."""
+        if self.dp_mesh.size() <= 1:
+            return
+
+        dp_group = self.dp_mesh.get_group()
+        try:
+            src_rank = min(dist.get_process_group_ranks(dp_group))
+        except Exception:
+            # init_device_mesh uses row-major ranks for the (dp, pp) mesh.
+            src_rank = self.stage_idx
+
+        for param in self.stage_model.parameters():
+            dist.broadcast(param.data, src=src_rank, group=dp_group)
+        for buffer in self.stage_model.buffers():
+            dist.broadcast(buffer.data, src=src_rank, group=dp_group)
 
     def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
         for p in module.parameters():
@@ -548,6 +655,7 @@ class PolarParallel:
                     else None
                 )
                 attention_mask = batch["attention_mask"].to(self.device)
+                self._debug_batch(batch_idx, input_ids, labels, attention_mask)
 
                 if self.optimizer:
                     self.optimizer.zero_grad()
@@ -730,6 +838,17 @@ class PolarParallel:
         def loss_fn(output, target):
             """Memory-optimized LM loss (avoid contiguous huge temps)."""
             import torch.nn.functional as F
+            if self._debug_enabled():
+                finite_output = bool(torch.isfinite(output).all().item())
+                valid_targets = int(target.ne(-100).sum().item())
+                print(
+                    f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
+                    f"baseline_loss_fn output_finite={finite_output} "
+                    f"output_min={output.nan_to_num().min().item():.6g} "
+                    f"output_max={output.nan_to_num().max().item():.6g} "
+                    f"valid_targets={valid_targets}",
+                    flush=True,
+                )
             return F.cross_entropy(
                 output.reshape(-1, output.size(-1)),
                 target.reshape(-1),
@@ -792,6 +911,7 @@ class PolarParallel:
                     else None
                 )
                 attention_mask = batch["attention_mask"].to(self.device)
+                self._debug_batch(batch_idx, input_ids, labels, attention_mask)
 
                 optimizer.zero_grad(set_to_none=True)
 
