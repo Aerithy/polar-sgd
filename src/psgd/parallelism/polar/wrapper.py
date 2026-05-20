@@ -2,6 +2,7 @@ import os
 import datetime
 import argparse
 import logging
+import contextlib
 # from turtle import back
 import numpy as np
 
@@ -43,6 +44,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 POLAR_WRAPPER_FIX_VERSION = "llama_init_broadcast_debug_v1"
+
+
+class _NoopProfiler:
+    def step(self) -> None:
+        return None
 
 
 class NativePolarGradientCollector:
@@ -324,6 +330,23 @@ class PolarParallel:
     def _debug_enabled(self) -> bool:
         return int(getattr(self.args, "debug_nan_steps", 0) or 0) > 0
 
+    def _profiler_context(self, trace_dir: str):
+        if bool(getattr(self.args, "disable_profiler", False)):
+            return contextlib.nullcontext(_NoopProfiler())
+
+        return torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            profile_memory=True,
+            record_shapes=True,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_dir),
+            with_stack=True,
+            acc_events=True,
+        )
+
     def _debug_check_stage_parameters(self, where: str) -> None:
         if not self._debug_enabled():
             return
@@ -538,6 +561,7 @@ class PolarParallel:
         if not self.use_local_sgd:
             polar_hook = getattr(self.args, "polar_hook", "io")
             polar_beta = float(getattr(self.args, "polar_beta", 0.9))
+            lowbit_group = getattr(self, "lowbit_group", None)
 
             if polar_hook == "momentum":
                 from .hooks import PolarGpipeMomentumExtrapHook
@@ -552,6 +576,7 @@ class PolarParallel:
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
                         beta=polar_beta,
+                        lowbit_group=lowbit_group,
                     )
                 )
             elif polar_hook == "io":
@@ -566,6 +591,7 @@ class PolarParallel:
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
                     )
                 )
             elif polar_hook == "ef_only":
@@ -580,6 +606,7 @@ class PolarParallel:
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
                     )
                 )
             elif polar_hook == "scaling_only":
@@ -594,6 +621,7 @@ class PolarParallel:
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
                     )
                 )
             elif polar_hook == "none":
@@ -608,6 +636,7 @@ class PolarParallel:
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
                     )
                 )
             else:
@@ -621,6 +650,7 @@ class PolarParallel:
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
                     )
                 )
 
@@ -633,18 +663,7 @@ class PolarParallel:
         max_steps = getattr(self.args, "max_steps", None)
         grad_clip_norm = float(getattr(self.args, "grad_clip_norm", 1.0))
 
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            profile_memory=True,
-            record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(self.tensorboard_trace_dir),
-            with_stack=True,
-            acc_events=True,
-        ) as prof:
+        with self._profiler_context(self.tensorboard_trace_dir) as prof:
             for batch_idx, batch in enumerate(pbar):
                 if max_steps is not None and batch_idx >= int(max_steps):
                     break
@@ -887,20 +906,7 @@ class PolarParallel:
         if baseline_stage.is_last:
             baseline_writer = SummaryWriter(log_dir=baseline_scalar_dir)
 
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            profile_memory=True,
-            record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1,
-                                             active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                baseline_trace_dir),
-            with_stack=True,
-            acc_events=True,
-        ) as prof:
+        with self._profiler_context(baseline_trace_dir) as prof:
             for batch_idx, batch in enumerate(pbar):
                 if max_steps is not None and batch_idx >= int(max_steps):
                     break

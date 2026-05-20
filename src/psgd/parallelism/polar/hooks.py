@@ -10,6 +10,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _all_reduce_flat_async(
+    tensor: torch.Tensor,
+    *,
+    group,
+    lowbit_group=None,
+):
+    if lowbit_group is not None:
+        return lowbit_group.all_reduce(
+            tensor,
+            op=dist.ReduceOp.SUM,
+            async_op=True,
+        )
+    return dist.all_reduce(tensor, group=group, async_op=True)
+
+
 class GpipeHook:
     """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
     """
@@ -22,6 +37,7 @@ class GpipeHook:
         errors: List[torch.Tensor],
         micro_batch_size: int,
         comm_timing: int,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -41,6 +57,7 @@ class GpipeHook:
         self.offset = 0
         self.comm_handle = None
         self.comm_timing = comm_timing
+        self.lowbit_group = lowbit_group
 
     def __call__(self, *args, **kwds):
         device = next(self.model.parameters()).device
@@ -85,8 +102,10 @@ class GpipeHook:
             if self.flattened_grad_pred.device != device:
                 self.flattened_grad_pred = self.flattened_grad_pred.to(device)
                 
-            self.comm_handle = dist.all_reduce(
-                self.flattened_grad_pred, group=self.dp_group, async_op=True
+            self.comm_handle = _all_reduce_flat_async(
+                self.flattened_grad_pred,
+                group=self.dp_group,
+                lowbit_group=self.lowbit_group,
             )
             
             for i, e in enumerate(self.errors):
@@ -481,6 +500,7 @@ class PolarGpipeIoOptimHook:
         errors: List[Optional[torch.Tensor]],
         micro_batch_size: int,
         comm_timing: int,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -500,6 +520,7 @@ class PolarGpipeIoOptimHook:
 
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
 
         # Build stable param list once
         self.params: List[torch.nn.Parameter] = [
@@ -592,10 +613,10 @@ class PolarGpipeIoOptimHook:
             self._pack_predicted_(scale=scale)
 
             # Async DP all-reduce on flat buffer
-            self.comm_handle = dist.all_reduce(
+            self.comm_handle = _all_reduce_flat_async(
                 self.flat_pred,
                 group=self.dp_group,
-                async_op=True,
+                lowbit_group=self.lowbit_group,
             )
 
             # Clear error buffers (same semantic as old code)
@@ -780,6 +801,7 @@ class PolarGpipeMomentumExtrapHook:
         micro_batch_size: int,
         comm_timing: int,
         beta: float = 0.9,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -801,6 +823,7 @@ class PolarGpipeMomentumExtrapHook:
 
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
 
         # Stable param list
         self.params: List[torch.nn.Parameter] = [
@@ -883,10 +906,10 @@ class PolarGpipeMomentumExtrapHook:
         if self._trigger_condition():
             # No scaling here; prediction uses momentum/EMA.
             self._pack_predicted_()
-            self.comm_handle = dist.all_reduce(
+            self.comm_handle = _all_reduce_flat_async(
                 self.flat_pred,
                 group=self.dp_group,
-                async_op=True,
+                lowbit_group=self.lowbit_group,
             )
 
             # Clear errors (same semantic as existing POLAR code)
@@ -940,6 +963,7 @@ class PolarGpipeErrorFeedbackOnlyHook:
         errors: List[Optional[torch.Tensor]],
         micro_batch_size: int,
         comm_timing: int,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -956,6 +980,7 @@ class PolarGpipeErrorFeedbackOnlyHook:
 
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
 
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
@@ -1018,10 +1043,10 @@ class PolarGpipeErrorFeedbackOnlyHook:
 
         if self._trigger_condition():
             self._pack_predicted_()
-            self.comm_handle = dist.all_reduce(
+            self.comm_handle = _all_reduce_flat_async(
                 self.flat_pred,
                 group=self.dp_group,
-                async_op=True,
+                lowbit_group=self.lowbit_group,
             )
 
         self.micro_batch_counter += 1
@@ -1066,6 +1091,7 @@ class PolarGpipeScalingOnlyHook:
         errors: List[Optional[torch.Tensor]],
         micro_batch_size: int,
         comm_timing: int,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -1082,6 +1108,7 @@ class PolarGpipeScalingOnlyHook:
 
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
 
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
@@ -1140,10 +1167,10 @@ class PolarGpipeScalingOnlyHook:
         if self._trigger_condition():
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
             self._pack_predicted_(scale=scale)
-            self.comm_handle = dist.all_reduce(
+            self.comm_handle = _all_reduce_flat_async(
                 self.flat_pred,
                 group=self.dp_group,
-                async_op=True,
+                lowbit_group=self.lowbit_group,
             )
 
         self.micro_batch_counter += 1
@@ -1185,6 +1212,7 @@ class PolarGpipeNothingHook:
         errors: List[Optional[torch.Tensor]],
         micro_batch_size: int,
         comm_timing: int,
+        lowbit_group=None,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -1201,6 +1229,7 @@ class PolarGpipeNothingHook:
 
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
 
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
@@ -1257,10 +1286,10 @@ class PolarGpipeNothingHook:
 
         if self._trigger_condition():
             self._pack_predicted_()
-            self.comm_handle = dist.all_reduce(
+            self.comm_handle = _all_reduce_flat_async(
                 self.flat_pred,
                 group=self.dp_group,
-                async_op=True,
+                lowbit_group=self.lowbit_group,
             )
 
         self.micro_batch_counter += 1
