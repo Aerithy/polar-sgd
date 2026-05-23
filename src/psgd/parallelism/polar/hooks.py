@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -10,6 +12,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _polar_hook_debug_enabled() -> bool:
+    return os.environ.get("POLAR_HOOK_DEBUG", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _polar_hook_debug(message: str) -> None:
+    if not _polar_hook_debug_enabled():
+        return
+    try:
+        rank = dist.get_rank()
+    except Exception:
+        rank = -1
+    print(
+        f"[polar-hook-debug rank={rank} t={time.time():.6f}] {message}",
+        flush=True,
+    )
+
+
 def _all_reduce_flat_async(
     tensor: torch.Tensor,
     *,
@@ -17,12 +41,43 @@ def _all_reduce_flat_async(
     lowbit_group=None,
 ):
     if lowbit_group is not None:
-        return lowbit_group.all_reduce(
+        if not getattr(_all_reduce_flat_async, "_logged_lowbit", False):
+            logger.info(
+                "[polar-hook] using LowBitGroup for flat DP all-reduce: "
+                "bitwidth=%s numel=%s dtype=%s device=%s",
+                getattr(lowbit_group, "bitwidth", "unknown"),
+                int(tensor.numel()),
+                tensor.dtype,
+                tensor.device,
+            )
+            _all_reduce_flat_async._logged_lowbit = True
+        _polar_hook_debug(
+            "lowbit all_reduce start "
+            f"numel={int(tensor.numel())} dtype={tensor.dtype} "
+            f"bitwidth={getattr(lowbit_group, 'bitwidth', 'unknown')}"
+        )
+        work = lowbit_group.all_reduce(
             tensor,
             op=dist.ReduceOp.SUM,
             async_op=True,
         )
-    return dist.all_reduce(tensor, group=group, async_op=True)
+        _polar_hook_debug("lowbit all_reduce returned")
+        return work
+    _polar_hook_debug(
+        "dense all_reduce async start "
+        f"numel={int(tensor.numel())} dtype={tensor.dtype}"
+    )
+    work = dist.all_reduce(tensor, group=group, async_op=True)
+    _polar_hook_debug("dense all_reduce async returned")
+    return work
+
+
+def _wait_and_average_flat(work, tensor: torch.Tensor, group) -> None:
+    if work is not None:
+        work.wait()
+    world_size = dist.get_world_size(group)
+    if world_size > 1:
+        tensor.div_(world_size)
 
 
 class GpipeHook:
@@ -115,7 +170,11 @@ class GpipeHook:
         self.micro_batch_counter += 1
         
         if self.micro_batch_counter == self.micro_batch_size:
-            self.comm_handle.wait()
+            _wait_and_average_flat(
+                self.comm_handle,
+                self.flattened_grad_pred,
+                self.dp_group,
+            )
             new_errors = []
             for g, p in zip(self.grads, self.grads_pred):
                 if g is None or p is None:
@@ -610,6 +669,14 @@ class PolarGpipeIoOptimHook:
 
         if self._trigger_condition():
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
+            _polar_hook_debug(
+                "PolarGpipeIoOptimHook trigger "
+                f"pp_rank={self.pp_local_rank} "
+                f"micro_batch={self.micro_batch_counter} "
+                f"micro_batches={self.micro_batch_size} "
+                f"comm_timing={self.comm_timing} "
+                f"scale={scale:.6f}"
+            )
             self._pack_predicted_(scale=scale)
 
             # Async DP all-reduce on flat buffer
@@ -629,7 +696,19 @@ class PolarGpipeIoOptimHook:
         if self.micro_batch_counter == self.micro_batch_size:
             # Wait for DP reduction
             if self.comm_handle is not None:
-                self.comm_handle.wait()
+                _polar_hook_debug(
+                    "PolarGpipeIoOptimHook wait start "
+                    f"pp_rank={self.pp_local_rank}"
+                )
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
+                _polar_hook_debug(
+                    "PolarGpipeIoOptimHook wait done "
+                    f"pp_rank={self.pp_local_rank}"
+                )
 
             # Update errors: e := g - p
             new_errors: List[Optional[torch.Tensor]] = []
@@ -921,7 +1000,11 @@ class PolarGpipeMomentumExtrapHook:
 
         if self.micro_batch_counter == self.micro_batch_size:
             if self.comm_handle is not None:
-                self.comm_handle.wait()
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
 
             # Update error feedback: e := g - pred
             new_errors: List[Optional[torch.Tensor]] = []
@@ -1053,7 +1136,11 @@ class PolarGpipeErrorFeedbackOnlyHook:
 
         if self.micro_batch_counter == self.micro_batch_size:
             if self.comm_handle is not None:
-                self.comm_handle.wait()
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
 
             new_errors: List[Optional[torch.Tensor]] = []
             for g, p_pred in zip(self.grads, self.grads_pred):
@@ -1177,7 +1264,11 @@ class PolarGpipeScalingOnlyHook:
 
         if self.micro_batch_counter == self.micro_batch_size:
             if self.comm_handle is not None:
-                self.comm_handle.wait()
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
 
             # No error-feedback update.
             for i in range(len(self.errors)):
@@ -1296,7 +1387,11 @@ class PolarGpipeNothingHook:
 
         if self.micro_batch_counter == self.micro_batch_size:
             if self.comm_handle is not None:
-                self.comm_handle.wait()
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
 
             # No error-feedback.
             for i in range(len(self.errors)):

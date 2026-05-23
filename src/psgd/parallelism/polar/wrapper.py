@@ -3,6 +3,8 @@ import datetime
 import argparse
 import logging
 import contextlib
+import csv
+import time
 # from turtle import back
 import numpy as np
 
@@ -49,6 +51,29 @@ POLAR_WRAPPER_FIX_VERSION = "llama_init_broadcast_debug_v1"
 class _NoopProfiler:
     def step(self) -> None:
         return None
+
+
+def _polar_step_debug_enabled() -> bool:
+    return os.environ.get("POLAR_STEP_DEBUG", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _polar_step_debug(message: str) -> None:
+    if not _polar_step_debug_enabled():
+        return
+    try:
+        rank = dist.get_rank()
+    except Exception:
+        rank = -1
+    print(
+        f"[polar-step-debug rank={rank} t={datetime.datetime.now().isoformat()}] "
+        f"{message}",
+        flush=True,
+    )
 
 
 class NativePolarGradientCollector:
@@ -227,6 +252,10 @@ class PolarParallel:
         self.use_local_sgd = use_local_sgd
         self.local_sgd_steps = local_sgd_steps
         self.local_step_counter = 0
+        self.local_sgd_mode = str(
+            getattr(args, "local_sgd_mode", "blocking")
+        ).replace("_", "-")
+        self._pending_local_sgd = None
 
         local_rank = int(os.environ["LOCAL_RANK"])
         self.device = torch.device(f"cuda:{local_rank}")
@@ -324,8 +353,101 @@ class PolarParallel:
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
+        self._init_step_csv()
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
+
+    def _init_step_csv(self) -> None:
+        self.step_csv_path = None
+        if not self.stage.is_last or self.dp_mesh.get_local_rank() != 0:
+            return
+
+        log_dir = getattr(
+            self.args,
+            "step_log_dir",
+            "experiments/quantization/outputs/step_csv",
+        )
+        run_label = getattr(self.args, "run_label", "")
+        if not run_label:
+            if self.use_local_sgd:
+                run_label = f"{self.local_sgd_mode}_diloco"
+            elif bool(getattr(self.args, "using_polar", False)):
+                run_label = f"polar_{getattr(self.args, 'polar_hook', 'io')}"
+            else:
+                run_label = f"baseline_{self.baseline_mode}"
+        run_id = f"{run_label}_{self.datetime}_dp{self.dp_mesh.size()}_pp{self.pp_mesh.size()}"
+        os.makedirs(log_dir, exist_ok=True)
+        self.step_csv_path = os.path.join(log_dir, f"{run_id}.csv")
+        with open(self.step_csv_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "step",
+                    "loss",
+                    "step_time_s",
+                    "elapsed_s",
+                    "train_mode",
+                    "baseline_mode",
+                    "polar_hook",
+                    "ablation",
+                    "local_sgd_mode",
+                    "local_sgd_steps",
+                    "dp_world_size",
+                    "pp_size",
+                ]
+            )
+
+    def _ablation_label(self) -> str:
+        polar_hook = getattr(self.args, "polar_hook", "")
+        labels = {
+            "io": "full",
+            "momentum": "momentum",
+            "gpipe": "legacy_scaling",
+            "ef_only": "no_gradient_scaling",
+            "scaling_only": "no_error_feedback",
+            "none": "no_error_feedback_no_gradient_scaling",
+        }
+        return labels.get(polar_hook, "")
+
+    def _mean_dp_loss(self, loss: torch.Tensor) -> float:
+        loss_tensor = loss.detach().to(torch.float32)
+        if self.dp_mesh.size() > 1:
+            dist.all_reduce(
+                loss_tensor,
+                op=dist.ReduceOp.SUM,
+                group=self.dp_mesh.get_group(),
+            )
+            loss_tensor.div_(self.dp_mesh.size())
+        return float(loss_tensor.item())
+
+    def _append_step_csv(
+        self,
+        *,
+        step: int,
+        loss_value: float,
+        step_time_s: float,
+        elapsed_s: float,
+    ) -> None:
+        if self.step_csv_path is None:
+            return
+        with open(self.step_csv_path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    step,
+                    loss_value,
+                    step_time_s,
+                    elapsed_s,
+                    getattr(self.args, "train_mode", ""),
+                    self.baseline_mode,
+                    getattr(self.args, "polar_hook", ""),
+                    self._ablation_label(),
+                    self.local_sgd_mode if self.use_local_sgd else "",
+                    self.local_sgd_steps if self.use_local_sgd else "",
+                    self.dp_mesh.size(),
+                    self.pp_mesh.size(),
+                ]
+            )
 
     def _debug_enabled(self) -> bool:
         return int(getattr(self.args, "debug_nan_steps", 0) or 0) > 0
@@ -469,6 +591,38 @@ class PolarParallel:
                 # All-reduce parameters (SUM) then average
                 dist.all_reduce(param.data, op=dist.ReduceOp.SUM, group=dp_group)
                 param.data.div_(dp_size)
+
+    def _launch_parameters_local_sgd_async(self) -> None:
+        """Start a nonblocking Local-SGD parameter average."""
+        if self._pending_local_sgd is not None:
+            self._finish_parameters_local_sgd_async()
+
+        dp_group = self.dp_mesh.get_group()
+        params = [p for p in self.stage.submod.parameters()]
+        numels = [int(p.numel()) for p in params]
+        if not numels:
+            return
+        flat = torch.cat([p.detach().reshape(-1) for p in params], dim=0).clone()
+        work = dist.all_reduce(
+            flat,
+            op=dist.ReduceOp.SUM,
+            group=dp_group,
+            async_op=True,
+        )
+        self._pending_local_sgd = (work, flat, params, numels)
+
+    @torch.no_grad()
+    def _finish_parameters_local_sgd_async(self) -> None:
+        if self._pending_local_sgd is None:
+            return
+        work, flat, params, numels = self._pending_local_sgd
+        work.wait()
+        flat.div_(self.dp_mesh.size())
+        offset = 0
+        for param, numel in zip(params, numels):
+            param.copy_(flat[offset : offset + numel].view_as(param))
+            offset += numel
+        self._pending_local_sgd = None
 
     def _allreduce_dp_grads_(self):
         """All-reduce grads across the DP group (SUM then average).
@@ -662,11 +816,15 @@ class PolarParallel:
 
         max_steps = getattr(self.args, "max_steps", None)
         grad_clip_norm = float(getattr(self.args, "grad_clip_norm", 1.0))
+        run_t0 = time.perf_counter()
 
         with self._profiler_context(self.tensorboard_trace_dir) as prof:
             for batch_idx, batch in enumerate(pbar):
                 if max_steps is not None and batch_idx >= int(max_steps):
                     break
+                step_t0 = time.perf_counter()
+                if self.use_local_sgd and self.local_sgd_mode == "streaming":
+                    self._finish_parameters_local_sgd_async()
                 input_ids = batch["input_ids"].to(self.device)
                 labels = (
                     batch["labels"].to(self.device)
@@ -679,6 +837,12 @@ class PolarParallel:
                 if self.optimizer:
                     self.optimizer.zero_grad()
 
+                _polar_step_debug(
+                    f"step={global_step} batch={batch_idx} "
+                    f"stage={self.stage_idx} "
+                    f"is_first={self.stage.is_first} "
+                    f"is_last={self.stage.is_last} schedule.step enter"
+                )
                 if self.stage.is_first:
                     self.schedule.step(
                         input_ids, attention_mask=attention_mask
@@ -690,12 +854,17 @@ class PolarParallel:
                         attention_mask=attention_mask
                     )
                     loss = torch.stack(losses).mean()
+                    mean_loss = self._mean_dp_loss(loss)
 
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
-                        print(f"Step {global_step}, Loss: {loss.item():.4f}")
+                        print(f"Step {global_step}, Loss: {mean_loss:.4f}")
                 else:
                     self.schedule.step(attention_mask=attention_mask)
+                _polar_step_debug(
+                    f"step={global_step} batch={batch_idx} "
+                    f"stage={self.stage_idx} schedule.step exit"
+                )
 
                 if self._has_nonfinite_grads(self.stage.submod):
                     if self.optimizer:
@@ -714,13 +883,18 @@ class PolarParallel:
 
                 self.optimizer.step()
                 self.local_step_counter += 1
+                step_idx = global_step
                 global_step += 1
 
+                launch_streaming_local_sgd = False
                 # Local-SGD: sync parameters every N steps
                 if self.use_local_sgd and (
                     self.local_step_counter % self.local_sgd_steps == 0
                 ):
-                    self._sync_parameters_local_sgd()
+                    if self.local_sgd_mode == "streaming":
+                        launch_streaming_local_sgd = True
+                    else:
+                        self._sync_parameters_local_sgd()
 
                 # Optional eval
                 if (
@@ -740,10 +914,28 @@ class PolarParallel:
                 prof.step()
 
                 if self.stage.is_last:
-                    avg_train_loss = loss
+                    torch.cuda.synchronize(self.device)
+                    step_time_s = time.perf_counter() - step_t0
+                    elapsed_s = time.perf_counter() - run_t0
+                    avg_train_loss = mean_loss
                     self.writer.add_scalar(
                         'Loss/train', avg_train_loss, batch_idx
                     )
+                    self.writer.add_scalar(
+                        'Time/step_wall_s', step_time_s, batch_idx
+                    )
+                    self._append_step_csv(
+                        step=step_idx,
+                        loss_value=mean_loss,
+                        step_time_s=step_time_s,
+                        elapsed_s=elapsed_s,
+                    )
+
+                if launch_streaming_local_sgd:
+                    self._launch_parameters_local_sgd_async()
+
+        if self.use_local_sgd and self.local_sgd_mode == "streaming":
+            self._finish_parameters_local_sgd_async()
 
     def train_test(self):
         self.stage.submod.register_full_backward_hook(GpipeHook(
@@ -906,10 +1098,12 @@ class PolarParallel:
         if baseline_stage.is_last:
             baseline_writer = SummaryWriter(log_dir=baseline_scalar_dir)
 
+        run_t0 = time.perf_counter()
         with self._profiler_context(baseline_trace_dir) as prof:
             for batch_idx, batch in enumerate(pbar):
                 if max_steps is not None and batch_idx >= int(max_steps):
                     break
+                step_t0 = time.perf_counter()
                 input_ids = batch["input_ids"].to(self.device)
                 labels = (
                     batch["labels"].to(self.device)
@@ -931,9 +1125,10 @@ class PolarParallel:
                         attention_mask=attention_mask,
                     )
                     loss = torch.stack(losses).mean()
+                    mean_loss = self._mean_dp_loss(loss)
                     pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                     if global_step % 100 == 0:
-                        print(f"Step {global_step}, Loss: {loss.item():.4f}")
+                        print(f"Step {global_step}, Loss: {mean_loss:.4f}")
                 else:
                     schedule.step(attention_mask=attention_mask)
 
@@ -956,10 +1151,23 @@ class PolarParallel:
                     )
 
                 optimizer.step()
+                step_idx = global_step
                 global_step += 1
 
                 if baseline_stage.is_last and baseline_writer is not None:
-                    baseline_writer.add_scalar('Loss/train', loss, batch_idx)
+                    torch.cuda.synchronize(self.device)
+                    step_time_s = time.perf_counter() - step_t0
+                    elapsed_s = time.perf_counter() - run_t0
+                    baseline_writer.add_scalar('Loss/train', mean_loss, batch_idx)
+                    baseline_writer.add_scalar(
+                        'Time/step_wall_s', step_time_s, batch_idx
+                    )
+                    self._append_step_csv(
+                        step=step_idx,
+                        loss_value=mean_loss,
+                        step_time_s=step_time_s,
+                        elapsed_s=elapsed_s,
+                    )
 
                 prof.step()
 
