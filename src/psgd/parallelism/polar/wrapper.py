@@ -76,6 +76,29 @@ def _polar_step_debug(message: str) -> None:
     )
 
 
+def _trace_explain_enabled() -> bool:
+    return os.environ.get("TRACE_EXPLAIN", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _trace_evidence(component: str, action: str, message: str) -> None:
+    if not _trace_explain_enabled():
+        return
+    try:
+        rank = dist.get_rank()
+    except Exception:
+        rank = -1
+    print(
+        f"[trace-evidence rank={rank}] component={component} "
+        f"action={action} {message}",
+        flush=True,
+    )
+
+
 class NativePolarGradientCollector:
     """
     methods:
@@ -349,6 +372,20 @@ class PolarParallel:
             f"rank={dist.get_rank()} stage={self.stage_idx}",
             flush=True,
         )
+        _trace_evidence(
+            "PolarParallel",
+            "init",
+            "meaning='this rank is running the PolarParallel training wrapper "
+            "with 1F1B pipeline scheduling' "
+            f"rank={dist.get_rank()} stage={self.stage_idx} "
+            f"stage_is_first={self.stage.is_first} "
+            f"stage_is_last={self.stage.is_last} "
+            f"dp_world_size={self.dp_mesh.size()} pp_size={self.pp_mesh.size()} "
+            f"train_mode={getattr(self.args, 'train_mode', 'unknown')} "
+            f"method={getattr(self.args, 'method', 'unknown')} "
+            f"polar_hook={getattr(self.args, 'polar_hook', 'unknown')} "
+            f"comm_timing={self.comm_timing} micro_batches={self.micro_batches}",
+        )
 
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
@@ -356,6 +393,13 @@ class PolarParallel:
         self._init_step_csv()
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
+        _trace_evidence(
+            "PolarParallel",
+            "stage_partition",
+            "meaning='this pipeline stage owns this slice of Llama layers' "
+            f"rank={dist.get_rank()} stage={self.stage_idx} "
+            f"num_layers={len(self.stage_model.model.layers)}",
+        )
 
     def _init_step_csv(self) -> None:
         self.step_csv_path = None

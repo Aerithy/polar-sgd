@@ -34,6 +34,29 @@ def _polar_hook_debug(message: str) -> None:
     )
 
 
+def _trace_explain_enabled() -> bool:
+    return os.environ.get("TRACE_EXPLAIN", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _trace_evidence(component: str, action: str, message: str) -> None:
+    if not _trace_explain_enabled():
+        return
+    try:
+        rank = dist.get_rank()
+    except Exception:
+        rank = -1
+    print(
+        f"[trace-evidence rank={rank}] component={component} "
+        f"action={action} {message}",
+        flush=True,
+    )
+
+
 def _all_reduce_flat_async(
     tensor: torch.Tensor,
     *,
@@ -41,6 +64,15 @@ def _all_reduce_flat_async(
     lowbit_group=None,
 ):
     if lowbit_group is not None:
+        _trace_evidence(
+            "POLAR",
+            "handoff_to_bitscom_lowbit",
+            "meaning='POLAR produced one flat predicted DP-gradient buffer "
+            "and now calls bitscom LowBitGroup.all_reduce instead of dense "
+            "torch.distributed all_reduce' "
+            f"numel={int(tensor.numel())} dtype={tensor.dtype} "
+            f"device={tensor.device} bitwidth={getattr(lowbit_group, 'bitwidth', 'unknown')}",
+        )
         if not getattr(_all_reduce_flat_async, "_logged_lowbit", False):
             logger.info(
                 "[polar-hook] using LowBitGroup for flat DP all-reduce: "
@@ -63,6 +95,13 @@ def _all_reduce_flat_async(
         )
         _polar_hook_debug("lowbit all_reduce returned")
         return work
+    _trace_evidence(
+        "POLAR",
+        "dense_dp_allreduce",
+        "meaning='POLAR hook is using regular dense DP all-reduce for this "
+        "buffer because no LowBitGroup was provided' "
+        f"numel={int(tensor.numel())} dtype={tensor.dtype} device={tensor.device}",
+    )
     _polar_hook_debug(
         "dense all_reduce async start "
         f"numel={int(tensor.numel())} dtype={tensor.dtype}"
@@ -669,6 +708,18 @@ class PolarGpipeIoOptimHook:
 
         if self._trigger_condition():
             scale = self.micro_batch_size / (self.micro_batch_counter + 1)
+            _trace_evidence(
+                "POLAR",
+                "hook_trigger",
+                "meaning='IO-optimized POLAR hook fires at the configured "
+                "microbatch, forms predicted_grad = accumulated_grad * scale "
+                "+ error_feedback, then starts async DP communication' "
+                f"hook=PolarGpipeIoOptimHook pp_rank={self.pp_local_rank} "
+                f"micro_batch={self.micro_batch_counter} "
+                f"micro_batches={self.micro_batch_size} "
+                f"comm_timing={self.comm_timing} scale={scale:.6f} "
+                "uses_error_feedback=True uses_gradient_scaling=True",
+            )
             _polar_hook_debug(
                 "PolarGpipeIoOptimHook trigger "
                 f"pp_rank={self.pp_local_rank} "
@@ -696,6 +747,14 @@ class PolarGpipeIoOptimHook:
         if self.micro_batch_counter == self.micro_batch_size:
             # Wait for DP reduction
             if self.comm_handle is not None:
+                _trace_evidence(
+                    "POLAR",
+                    "wait_for_async_dp_reduce",
+                    "meaning='Pipeline reached the end of this step; POLAR now "
+                    "waits for the early DP communication result and averages "
+                    "it across DP replicas before optimizer.step()' "
+                    f"hook=PolarGpipeIoOptimHook pp_rank={self.pp_local_rank}",
+                )
                 _polar_hook_debug(
                     "PolarGpipeIoOptimHook wait start "
                     f"pp_rank={self.pp_local_rank}"
@@ -720,6 +779,13 @@ class PolarGpipeIoOptimHook:
                     err = g - p_pred
                     new_errors.append(err)
             self.errors = new_errors
+            _trace_evidence(
+                "POLAR",
+                "error_feedback_update",
+                "meaning='POLAR stores residual error_feedback = true_grad - "
+                "communicated_predicted_grad for the next step' "
+                f"hook=PolarGpipeIoOptimHook pp_rank={self.pp_local_rank}",
+            )
 
             # Scatter reduced predicted grads to param.grad without clone
             self._unpack_predicted_()
