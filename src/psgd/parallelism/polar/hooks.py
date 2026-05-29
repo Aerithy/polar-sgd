@@ -1224,6 +1224,146 @@ class PolarGpipeErrorFeedbackOnlyHook:
             self.comm_handle = None
 
 
+class PolarGpipeLowMemoryErrorFeedbackHook:
+    """Error-feedback only, without a persistent grads_pred tensor list.
+
+    Memory policy:
+      - Do not allocate/maintain `grads` or `grads_pred`.
+      - Reuse autograd's accumulated `param.grad` as the true gradient.
+      - Keep only one persistent error tensor per parameter and one flat
+        communication buffer for the predicted gradient.
+
+    At the trigger microbatch:
+        sent = current_param_grad + error
+        error = -sent
+        async all-reduce(sent_flat)
+
+    At the end of the pipeline step:
+        error += final_param_grad      # now error = final_grad - sent
+        param.grad = averaged(sent)
+    """
+
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        errors: List[Optional[torch.Tensor]],
+        micro_batch_size: int,
+        comm_timing: int,
+        lowbit_group=None,
+    ):
+        self.device_mesh = device_mesh
+        self.model = model
+
+        self.dp_mesh = device_mesh["dp"]
+        self.dp_group = self.dp_mesh.get_group()
+
+        self.micro_batch_size = int(micro_batch_size)
+        self.comm_timing = int(comm_timing)
+        self.errors = errors
+        self.micro_batch_counter = 0
+        self.comm_handle: Optional[dist.Work] = None
+        self.lowbit_group = lowbit_group
+
+        self.params: List[torch.nn.Parameter] = [
+            p for p in self.model.parameters()
+        ]
+        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
+        total_numel = int(sum(self.tensor_numels))
+        dev = next(self.model.parameters()).device
+        dtype = next(self.model.parameters()).dtype
+        self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
+
+    def _trigger_condition(self) -> bool:
+        if self.comm_timing == -1:
+            trigger_batch = self.micro_batch_size / 2
+            return self.micro_batch_counter == trigger_batch
+        return self.micro_batch_counter == self.comm_timing
+
+    @torch.no_grad()
+    def _pack_pred_and_seed_error_(self) -> None:
+        offset = 0
+        for i, p in enumerate(self.params):
+            n = self.tensor_numels[i]
+            flat_slice = self.flat_pred[offset: offset + n]
+            err = self.errors[i]
+
+            if p.grad is None and err is None:
+                flat_slice.zero_()
+                offset += n
+                continue
+
+            if err is None:
+                err = torch.empty_like(p)
+                self.errors[i] = err
+
+            if p.grad is None:
+                flat_slice.copy_(err.reshape(-1))
+            else:
+                flat_slice.copy_(p.grad.reshape(-1))
+                flat_slice.add_(err.reshape(-1))
+
+            # Store -sent in the error buffer. At step end we add final grad,
+            # yielding residual error = final_grad - sent.
+            err.reshape(-1).copy_(flat_slice)
+            err.neg_()
+            offset += n
+
+    @torch.no_grad()
+    def _finish_error_and_unpack_(self) -> None:
+        offset = 0
+        for i, p in enumerate(self.params):
+            n = self.tensor_numels[i]
+            err = self.errors[i]
+
+            if err is None and p.grad is not None:
+                # No prediction was sent for this param at trigger time, but a
+                # later microbatch produced a gradient. Preserve it as residual.
+                err = torch.empty_like(p.grad)
+                err.copy_(p.grad)
+                self.errors[i] = err
+            elif err is not None and p.grad is not None:
+                err.add_(p.grad)
+
+            if p.grad is None or p.grad.numel() != n:
+                p.grad = torch.empty_like(p)
+            p.grad.reshape(-1).copy_(self.flat_pred[offset: offset + n])
+            offset += n
+
+    def __call__(self, *args, **kwds):
+        if self._trigger_condition():
+            self._pack_pred_and_seed_error_()
+            self.comm_handle = _all_reduce_flat_async(
+                self.flat_pred,
+                group=self.dp_group,
+                lowbit_group=self.lowbit_group,
+            )
+
+        self.micro_batch_counter += 1
+
+        if self.micro_batch_counter == self.micro_batch_size:
+            if self.comm_handle is None:
+                # If comm_timing is outside the microbatch range, fall back to
+                # end-of-step EF. This preserves correctness with less overlap.
+                self._pack_pred_and_seed_error_()
+                self.comm_handle = _all_reduce_flat_async(
+                    self.flat_pred,
+                    group=self.dp_group,
+                    lowbit_group=self.lowbit_group,
+                )
+
+            if self.comm_handle is not None:
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
+
+            self._finish_error_and_unpack_()
+            self.micro_batch_counter = 0
+            self.comm_handle = None
+
+
 class PolarGpipeScalingOnlyHook:
     """Ablation: gradient scaling only (no error-feedback).
 

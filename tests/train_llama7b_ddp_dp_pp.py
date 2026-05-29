@@ -271,11 +271,11 @@ def main():
         "--polar_hook",
         type=str,
         default="momentum",
-        choices=["io", "momentum", "gpipe", "ef_only", "scaling_only", "none"],
+        choices=["io", "momentum", "gpipe", "ef_only", "ef_lowmem", "scaling_only", "none"],
         help=(
             "Which POLAR gradient prediction hook to use (only applies when "
             "using_polar / manual DP path): 'momentum', 'io', 'gpipe', "
-            "'ef_only', 'scaling_only', or 'none'."
+            "'ef_only', 'ef_lowmem', 'scaling_only', or 'none'."
         ),
     )
     parser.add_argument(

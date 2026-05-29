@@ -8,6 +8,7 @@ from psgd.parallelism.polar.wrapper import PolarParallel
 
 import os
 import argparse
+import sys
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -15,14 +16,32 @@ from torch.distributed.pipelining import Schedule1F1B
 from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader, IterableDataset
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
+from pathlib import Path
 from typing import Iterable, Iterator, List, Optional
 from dataclasses import dataclass
 
 # -----------------------------
 # Training Configuration (aligned with train_qwen.py)
 # -----------------------------
+
+
+def import_bitscom():
+    try:
+        import bitscom
+
+        return bitscom
+    except ImportError:
+        repo_root = Path(__file__).resolve().parents[2]
+        bitscom_python = repo_root / "bitscom" / "python"
+        if bitscom_python.exists():
+            sys.path.insert(0, str(bitscom_python))
+        import bitscom
+
+        return bitscom
+
+
 @dataclass
 class TrainConfig:
     model_name: str = "Qwen/Qwen2.5-14B-Instruct"
@@ -49,6 +68,7 @@ class TrainConfig:
     bf16: bool = True
     fp16: bool = False
     activation_checkpointing: bool = True
+    init_from_pretrained: bool = False
 
 
 # -----------------------------
@@ -132,23 +152,23 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     if len(model.model.layers) == 0:
         model.model.layers = torch.nn.ModuleList([torch.nn.Identity()])
 
-    # Stage 0: keep embed_tokens, remove lm_head and final_norm
+    # Stage 0: keep embed_tokens, remove lm_head and final norm
     if stage_idx == 0:
         model.lm_head = None
+        if hasattr(model.model, 'norm'):
+            model.model.norm = None
         if hasattr(model.model, 'final_norm'):
             model.model.final_norm = None
-        if hasattr(model, 'norm'):
-            model.norm = None
     # Last stage: keep lm_head and norm, remove embed_tokens
     elif stage_idx == num_stages - 1:
         model.model.embed_tokens = None
     # Middle stages: remove all non-layer components
     else:
         model.model.embed_tokens = None
+        if hasattr(model.model, 'norm'):
+            model.model.norm = None
         if hasattr(model.model, 'final_norm'):
             model.model.final_norm = None
-        if hasattr(model, 'norm'):
-            model.norm = None
         model.lm_head = None
 
     # Save reference to original model for position embeddings
@@ -207,8 +227,8 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
                     hidden_states = layer_outputs
 
         # Apply final norm if present
-        if hasattr(model, 'norm') and model.norm is not None:
-            hidden_states = model.norm(hidden_states)
+        if hasattr(model.model, 'norm') and model.model.norm is not None:
+            hidden_states = model.model.norm(hidden_states)
         elif hasattr(model.model, 'final_norm') and model.model.final_norm is not None:
             hidden_states = model.model.final_norm(hidden_states)
 
@@ -237,7 +257,18 @@ def build_qwen_model(cfg: TrainConfig):
         "attn_implementation": attn_impl,
         "trust_remote_code": True,
     }
-    model = AutoModelForCausalLM.from_pretrained(cfg.model_name, **kwargs)
+    if cfg.init_from_pretrained:
+        model = AutoModelForCausalLM.from_pretrained(cfg.model_name, **kwargs)
+    else:
+        config = AutoConfig.from_pretrained(cfg.model_name, trust_remote_code=True)
+        if attn_impl is not None:
+            config._attn_implementation = attn_impl
+        with torch.device("meta"):
+            model = AutoModelForCausalLM.from_config(
+                config,
+                torch_dtype=kwargs["torch_dtype"],
+                trust_remote_code=True,
+            )
 
     if cfg.activation_checkpointing:
         # Disable KV cache for gradient checkpointing correctness.
@@ -299,9 +330,20 @@ def main():
     parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--fp16", action="store_true", default=False)
     parser.add_argument("--activation-checkpointing", action="store_true", default=True)
+    parser.add_argument(
+        "--init-from-pretrained",
+        action="store_true",
+        default=False,
+        help=(
+            "Load pretrained weights before partitioning. By default this "
+            "script builds from config because PolarParallel initializes the "
+            "partitioned stage on device."
+        ),
+    )
     
     # Parallelism
     parser.add_argument("--pp-size", type=int, default=1)
+    parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--micro-batches", type=int, default=1)
     parser.add_argument("--comm-timing", type=int, default=-1)
     parser.add_argument("--using-polar", type=bool, default=True)
@@ -311,13 +353,14 @@ def main():
         "--polar-hook",
         type=str,
         default="momentum",
-        choices=["io", "momentum", "gpipe", "ef_only", "scaling_only", "none"],
+        choices=["io", "momentum", "gpipe", "ef_only", "ef_lowmem", "scaling_only", "none"],
         help=(
             "Which POLAR gradient prediction hook to use: "
             "'momentum' (no scaling, EMA momentum extrapolation), "
             "'io' (IO-optimized scaling hook), "
             "'gpipe' (legacy scaling hook), "
             "'ef_only' (error feedback only), "
+            "'ef_lowmem' (error feedback only without grads_pred buffers), "
             "'scaling_only' (scaling only), "
             "or 'none' (no scaling, no error feedback)."
         ),
@@ -355,7 +398,24 @@ def main():
         help="Synchronize parameters every N steps in Local-SGD mode"
     )
 
+    # Communication backend for POLAR DP all-reduce.
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="bitscom",
+        choices=["none", "bitscom"],
+        help="Use dense torch.distributed DP communication or bitscom LowBitGroup.",
+    )
+    parser.add_argument("--bitwidth", type=int, default=4)
+    parser.add_argument("--simulate-quantization", action="store_true")
+    parser.add_argument("--stochastic-rounding", action="store_true")
+
     args = parser.parse_args()
+
+    bitscom_module = None
+    if args.method == "bitscom":
+        bitscom_module = import_bitscom()
+        bitscom_module.init(bitwidth=args.bitwidth)
     
     # Create config object aligned with train_qwen.py
     cfg = TrainConfig(
@@ -383,6 +443,7 @@ def main():
         bf16=args.bf16,
         fp16=args.fp16,
         activation_checkpointing=args.activation_checkpointing,
+        init_from_pretrained=args.init_from_pretrained,
     )
 
     # Initialize distributed
@@ -390,9 +451,25 @@ def main():
     world_size = dist.get_world_size()
     
     pp_size = args.pp_size
-    assert world_size % pp_size == 0, f"world_size {world_size} must be divisible by PP_SIZE {pp_size}"
-    dp_size = world_size // pp_size
-    device_mesh = init_device_mesh("cuda", (dp_size, pp_size), mesh_dim_names=("dp", "pp"))
+    tp_size = args.tp_size
+    model_parallel_size = pp_size * tp_size
+    assert world_size % model_parallel_size == 0, (
+        f"world_size {world_size} must be divisible by "
+        f"PP_SIZE * TP_SIZE ({pp_size} * {tp_size})"
+    )
+    dp_size = world_size // model_parallel_size
+    if tp_size > 1:
+        device_mesh = init_device_mesh(
+            "cuda",
+            (dp_size, pp_size, tp_size),
+            mesh_dim_names=("dp", "pp", "tp"),
+        )
+    else:
+        device_mesh = init_device_mesh(
+            "cuda",
+            (dp_size, pp_size),
+            mesh_dim_names=("dp", "pp"),
+        )
     dp_mesh = device_mesh["dp"]
     pp_mesh = device_mesh["pp"]
 
@@ -409,13 +486,31 @@ def main():
     # Build and partition Qwen model
     model = build_qwen_model(cfg)
     stage_idx = pp_mesh.get_local_rank()
-    print(f"Stage index: {stage_idx} / {pp_size}")
+    tp_rank = device_mesh["tp"].get_local_rank() if tp_size > 1 else 0
+    print(f"Stage index: {stage_idx} / {pp_size}; TP rank: {tp_rank} / {tp_size}")
     
     # Partition model for pipeline parallelism
     stage_model = partition_qwen_model(model, stage_idx, pp_size)
     
     dp_rank = dp_mesh.get_local_rank()
     print(f"DP rank: {dp_rank} / {dp_size}")
+
+    lowbit_group = None
+    if args.method == "bitscom":
+        lowbit_group = bitscom_module.LowBitGroup(
+            bitwidth=args.bitwidth,
+            process_group=dp_mesh.get_group(),
+            simulate_quantization=args.simulate_quantization,
+            stochastic_rounding=args.stochastic_rounding,
+        )
+        if dist.get_rank() == 0:
+            print(
+                "[bitscom] enabled for POLAR DP communication: "
+                f"bitwidth={args.bitwidth} "
+                f"simulate_quantization={args.simulate_quantization} "
+                f"stochastic_rounding={args.stochastic_rounding}",
+                flush=True,
+            )
     
     # Get dataloader
     dataloader = get_dataloader(cfg, tokenizer, pp_size)
@@ -442,6 +537,7 @@ def main():
         local_sgd_steps=args.local_sgd_steps,
         baseline_mode=args.baseline_mode,
     )
+    trainer.lowbit_group = lowbit_group
 
     trainer.train()
 

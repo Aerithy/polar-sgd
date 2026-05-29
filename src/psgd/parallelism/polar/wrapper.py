@@ -254,6 +254,10 @@ class PolarParallel:
         self.device_mesh = device_mesh
         self.dp_mesh = self.device_mesh["dp"]
         self.pp_mesh = self.device_mesh["pp"]
+        try:
+            self.tp_mesh = self.device_mesh["tp"]
+        except Exception:
+            self.tp_mesh = None
         self.micro_batches = micro_batches
         self.comm_timing = comm_timing
 
@@ -289,6 +293,7 @@ class PolarParallel:
                 f"/{self.args.dataset_config}/{optimizer}"
                 f"/{self.local_sgd_steps}"
                 f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+                f"-{self.tp_mesh.size() if self.tp_mesh is not None else 1}"
                 f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
             )
         else:
@@ -296,6 +301,7 @@ class PolarParallel:
                 f"./log/{self.args.using_polar}"
                 f"/{self.args.dataset_config}/{optimizer}/{self.comm_timing}"
                 f"/{self.datetime}-{self.dp_mesh.size()}-{self.pp_mesh.size()}"
+                f"-{self.tp_mesh.size() if self.tp_mesh is not None else 1}"
                 f"/{self.dp_mesh.get_local_rank()}/tb_scalars"
             )
         self.writer = SummaryWriter(log_dir=log_dir)
@@ -305,9 +311,13 @@ class PolarParallel:
         self.stage_idx = stage_idx
         self.stage_model = stage_model
         self._is_llama_stage = "Llama" in type(self.stage_model).__name__
-        self.stage_model.to_empty(device=self.device, recurse=True)
-        self.stage_model.apply(self._reset_module_parameters)
+        if bool(getattr(self.args, "init_from_pretrained", False)):
+            self.stage_model.to(self.device)
+        else:
+            self.stage_model.to_empty(device=self.device, recurse=True)
+            self.stage_model.apply(self._reset_module_parameters)
         self._broadcast_stage_parameters_from_dp_root()
+        self._apply_tensor_parallel_if_needed()
         self._debug_check_stage_parameters("after_init")
 
         self.stage = PipelineStage(
@@ -381,6 +391,7 @@ class PolarParallel:
             f"stage_is_first={self.stage.is_first} "
             f"stage_is_last={self.stage.is_last} "
             f"dp_world_size={self.dp_mesh.size()} pp_size={self.pp_mesh.size()} "
+            f"tp_size={self.tp_mesh.size() if self.tp_mesh is not None else 1} "
             f"train_mode={getattr(self.args, 'train_mode', 'unknown')} "
             f"method={getattr(self.args, 'method', 'unknown')} "
             f"polar_hook={getattr(self.args, 'polar_hook', 'unknown')} "
@@ -419,7 +430,11 @@ class PolarParallel:
                 run_label = f"polar_{getattr(self.args, 'polar_hook', 'io')}"
             else:
                 run_label = f"baseline_{self.baseline_mode}"
-        run_id = f"{run_label}_{self.datetime}_dp{self.dp_mesh.size()}_pp{self.pp_mesh.size()}"
+        tp_size = self.tp_mesh.size() if self.tp_mesh is not None else 1
+        run_id = (
+            f"{run_label}_{self.datetime}"
+            f"_dp{self.dp_mesh.size()}_pp{self.pp_mesh.size()}_tp{tp_size}"
+        )
         os.makedirs(log_dir, exist_ok=True)
         self.step_csv_path = os.path.join(log_dir, f"{run_id}.csv")
         with open(self.step_csv_path, "w", newline="", encoding="utf-8") as handle:
@@ -438,6 +453,7 @@ class PolarParallel:
                     "local_sgd_steps",
                     "dp_world_size",
                     "pp_size",
+                    "tp_size",
                 ]
             )
 
@@ -448,6 +464,7 @@ class PolarParallel:
             "momentum": "momentum",
             "gpipe": "legacy_scaling",
             "ef_only": "no_gradient_scaling",
+            "ef_lowmem": "error_feedback_low_memory",
             "scaling_only": "no_error_feedback",
             "none": "no_error_feedback_no_gradient_scaling",
         }
@@ -490,6 +507,7 @@ class PolarParallel:
                     self.local_sgd_steps if self.use_local_sgd else "",
                     self.dp_mesh.size(),
                     self.pp_mesh.size(),
+                    self.tp_mesh.size() if self.tp_mesh is not None else 1,
                 ]
             )
 
@@ -580,7 +598,7 @@ class PolarParallel:
             if isinstance(module, torch.nn.Embedding):
                 torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 return
-            if module.__class__.__name__ == "RMSNorm" and hasattr(module, "weight"):
+            if module.__class__.__name__.endswith("RMSNorm") and hasattr(module, "weight"):
                 torch.nn.init.ones_(module.weight)
                 return
 
@@ -589,8 +607,77 @@ class PolarParallel:
 
         # Some custom modules own parameters but do not implement reset_parameters.
         # After to_empty(), those parameters contain arbitrary device memory.
-        if module.__class__.__name__ == "RMSNorm" and hasattr(module, "weight"):
+        if module.__class__.__name__.endswith("RMSNorm") and hasattr(module, "weight"):
             torch.nn.init.ones_(module.weight)
+
+    def _apply_tensor_parallel_if_needed(self) -> None:
+        """Shard Qwen decoder-layer linears across the optional TP mesh."""
+        if self.tp_mesh is None or self.tp_mesh.size() <= 1:
+            return
+
+        try:
+            from torch.distributed.tensor.parallel import (
+                ColwiseParallel,
+                RowwiseParallel,
+                parallelize_module,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "tp_size > 1 requires torch.distributed.tensor.parallel "
+                "to be available in the PyTorch build."
+            ) from exc
+
+        if not (
+            hasattr(self.stage_model, "model")
+            and hasattr(self.stage_model.model, "layers")
+        ):
+            raise RuntimeError(
+                "Tensor parallelism is currently wired for Hugging Face "
+                "decoder-only models with model.layers, such as Qwen2."
+            )
+
+        tp_plan = {}
+        for layer_idx, layer in enumerate(self.stage_model.model.layers):
+            if isinstance(layer, torch.nn.Identity):
+                continue
+            prefix = f"model.layers.{layer_idx}"
+            tp_plan.update(
+                {
+                    f"{prefix}.self_attn.q_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.k_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.v_proj": ColwiseParallel(),
+                    f"{prefix}.self_attn.o_proj": RowwiseParallel(),
+                    f"{prefix}.mlp.gate_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.up_proj": ColwiseParallel(),
+                    f"{prefix}.mlp.down_proj": RowwiseParallel(),
+                }
+            )
+
+        if not tp_plan:
+            logger.warning(
+                "[tensor-parallel] rank=%s stage=%s has no decoder layers to shard",
+                dist.get_rank(),
+                self.stage_idx,
+            )
+            return
+
+        try:
+            parallelize_module(
+                self.stage_model,
+                self.tp_mesh,
+                tp_plan,
+                src_data_rank=None,
+            )
+        except TypeError:
+            parallelize_module(self.stage_model, self.tp_mesh, tp_plan)
+
+        logger.info(
+            "[tensor-parallel] rank=%s stage=%s tp_size=%s sharded_modules=%s",
+            dist.get_rank(),
+            self.stage_idx,
+            self.tp_mesh.size(),
+            len(tp_plan),
+        )
 
     @torch.no_grad()
     def _broadcast_stage_parameters_from_dp_root(self) -> None:
@@ -801,6 +888,19 @@ class PolarParallel:
                         model=self.stage.submod,
                         grads=self.gradients,
                         grads_pred=self.grads_pred,
+                        errors=self.errors,
+                        micro_batch_size=self.micro_batches,
+                        comm_timing=self.comm_timing,
+                        lowbit_group=lowbit_group,
+                    )
+                )
+            elif polar_hook == "ef_lowmem":
+                from .hooks import PolarGpipeLowMemoryErrorFeedbackHook
+
+                self.stage.submod.register_full_backward_hook(
+                    PolarGpipeLowMemoryErrorFeedbackHook(
+                        device_mesh=self.device_mesh,
+                        model=self.stage.submod,
                         errors=self.errors,
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
