@@ -184,6 +184,10 @@ def partition_qwen_model(
     # on meta can become uninitialized device buffers. Rebuild RoPE lazily.
     if hasattr(model.model, "rotary_emb"):
         model.model.rotary_emb = None
+    for layer in model.model.layers:
+        self_attn = getattr(layer, "self_attn", None)
+        if self_attn is not None and hasattr(self_attn, "rotary_emb"):
+            self_attn.rotary_emb = None
 
     def get_fallback_rotary_embedding(device):
         rotary_emb = getattr(model.model, "_polar_rotary_emb", None)
