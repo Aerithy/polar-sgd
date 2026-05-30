@@ -1432,6 +1432,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
             if err is None:
                 err = torch.empty_like(self._local_tensor(p.data))
+                err.zero_()
                 self.errors[entry.param_idx] = err
 
             err_flat = err.reshape(-1)
