@@ -316,8 +316,8 @@ class PolarParallel:
         else:
             self.stage_model.to_empty(device=self.device, recurse=True)
             self.stage_model.apply(self._reset_module_parameters)
-        self._broadcast_stage_parameters_from_dp_root()
         self._apply_tensor_parallel_if_needed()
+        self._broadcast_stage_parameters_from_dp_root()
         self._debug_check_stage_parameters("after_init")
 
         self.stage = PipelineStage(
@@ -666,7 +666,7 @@ class PolarParallel:
                 self.stage_model,
                 self.tp_mesh,
                 tp_plan,
-                src_data_rank=None,
+                src_data_rank=0,
             )
         except TypeError:
             parallelize_module(self.stage_model, self.tp_mesh, tp_plan)
@@ -693,9 +693,15 @@ class PolarParallel:
             src_rank = self.stage_idx
 
         for param in self.stage_model.parameters():
-            dist.broadcast(param.data, src=src_rank, group=dp_group)
+            tensor = param.data
+            if hasattr(tensor, "to_local"):
+                tensor = tensor.to_local()
+            dist.broadcast(tensor, src=src_rank, group=dp_group)
         for buffer in self.stage_model.buffers():
-            dist.broadcast(buffer.data, src=src_rank, group=dp_group)
+            tensor = buffer.data
+            if hasattr(tensor, "to_local"):
+                tensor = tensor.to_local()
+            dist.broadcast(tensor, src=src_rank, group=dp_group)
 
     def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
         for p in module.parameters():
@@ -905,6 +911,10 @@ class PolarParallel:
                         micro_batch_size=self.micro_batches,
                         comm_timing=self.comm_timing,
                         lowbit_group=lowbit_group,
+                        bucket_numel=int(getattr(self.args, "polar_bucket_numel", 4_000_000)),
+                        max_inflight_buckets=int(
+                            getattr(self.args, "polar_max_inflight_buckets", 1)
+                        ),
                     )
                 )
             elif polar_hook == "scaling_only":

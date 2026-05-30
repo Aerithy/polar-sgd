@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Node 0 of 2. Each node uses 16 GPUs as 8 PP stages x 2 TP ranks.
 # Across nodes, ranks with the same local (PP, TP) coordinates form POLAR DP.
-# Conservative 32GB smoke-test defaults: low-memory EF + bitscom, batch 1, seq 256.
+# Conservative 32GB smoke-test defaults: low-memory EF + bitscom, seq 256.
 
 MASTER_ADDR="${MASTER_ADDR:-10.48.95.29}"
 MASTER_PORT="${MASTER_PORT:-11234}"
@@ -26,14 +26,16 @@ torchrun \
   --model-name Qwen/Qwen2.5-14B-Instruct \
   --pp-size 8 \
   --tp-size 2 \
-  --micro-batches 1 \
+  --micro-batches 8 \
   --comm-timing 0 \
   --max-steps 10 \
-  --per-device-batch-size 1 \
+  --per-device-batch-size 8 \
   --seq-len 256 \
   --lr 2e-4 \
   --dataset-name-or-path HuggingFaceFW/fineweb \
   --text-field text \
   --polar-hook ef_lowmem \
+  --polar-bucket-numel 4000000 \
+  --polar-max-inflight-buckets 1 \
   --method bitscom \
   --bitwidth 4

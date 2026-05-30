@@ -371,6 +371,18 @@ def main():
         default=0.9,
         help="EMA momentum beta for polar_hook=momentum.",
     )
+    parser.add_argument(
+        "--polar-bucket-numel",
+        type=int,
+        default=4_000_000,
+        help="Maximum elements per ef_lowmem POLAR DP communication bucket.",
+    )
+    parser.add_argument(
+        "--polar-max-inflight-buckets",
+        type=int,
+        default=1,
+        help="Maximum ef_lowmem buckets kept alive at the same time.",
+    )
     
     # Baseline mode
     parser.add_argument(
@@ -411,6 +423,34 @@ def main():
     parser.add_argument("--stochastic-rounding", action="store_true")
 
     args = parser.parse_args()
+
+    if args.pp_size <= 0 or args.tp_size <= 0:
+        raise ValueError("--pp-size and --tp-size must be positive")
+    if args.micro_batches < args.pp_size:
+        raise ValueError(
+            f"--micro-batches ({args.micro_batches}) must be >= "
+            f"--pp-size ({args.pp_size}) for pipeline parallel training."
+        )
+    if args.per_device_batch_size < args.micro_batches:
+        raise ValueError(
+            f"--per-device-batch-size ({args.per_device_batch_size}) must be >= "
+            f"--micro-batches ({args.micro_batches}) because pipeline "
+            "microbatching splits the batch dimension."
+        )
+    if args.per_device_batch_size % args.micro_batches != 0:
+        raise ValueError(
+            f"--per-device-batch-size ({args.per_device_batch_size}) must be "
+            f"divisible by --micro-batches ({args.micro_batches})."
+        )
+    if args.comm_timing != -1 and not (0 <= args.comm_timing < args.micro_batches):
+        raise ValueError(
+            f"--comm-timing must be -1 or in [0, {args.micro_batches - 1}], "
+            f"got {args.comm_timing}."
+        )
+    if args.polar_bucket_numel <= 0:
+        raise ValueError("--polar-bucket-numel must be positive")
+    if args.polar_max_inflight_buckets <= 0:
+        raise ValueError("--polar-max-inflight-buckets must be positive")
 
     bitscom_module = None
     if args.method == "bitscom":

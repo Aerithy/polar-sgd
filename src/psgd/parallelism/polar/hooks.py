@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -117,6 +118,20 @@ def _wait_and_average_flat(work, tensor: torch.Tensor, group) -> None:
     world_size = dist.get_world_size(group)
     if world_size > 1:
         tensor.div_(world_size)
+
+
+@dataclass(frozen=True)
+class _BucketEntry:
+    param_idx: int
+    start: int
+    length: int
+
+
+@dataclass
+class _InflightBucket:
+    work: object
+    buffer: torch.Tensor
+    entries: List[_BucketEntry]
 
 
 class GpipeHook:
@@ -1225,22 +1240,18 @@ class PolarGpipeErrorFeedbackOnlyHook:
 
 
 class PolarGpipeLowMemoryErrorFeedbackHook:
-    """Error-feedback only, without a persistent grads_pred tensor list.
+    """Bucketed error-feedback only, without persistent grads_pred buffers.
 
     Memory policy:
       - Do not allocate/maintain `grads` or `grads_pred`.
       - Reuse autograd's accumulated `param.grad` as the true gradient.
-      - Keep only one persistent error tensor per parameter and one flat
-        communication buffer for the predicted gradient.
+      - Never build a full-stage flat buffer. Instead, build deterministic
+        buckets and all-reduce at most `max_inflight_buckets` bucket buffers.
 
-    At the trigger microbatch:
-        sent = current_param_grad + error
-        error = -sent
-        async all-reduce(sent_flat)
-
-    At the end of the pipeline step:
-        error += final_param_grad      # now error = final_grad - sent
-        param.grad = averaged(sent)
+    This low-memory path intentionally communicates at the end of the pipeline
+    step. Mid-step communication would require storing the reduced prediction
+    until later microbatches finish accumulating into `param.grad`, which brings
+    back the same full-stage memory pressure this hook is meant to avoid.
     """
 
     def __init__(
@@ -1251,6 +1262,8 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         micro_batch_size: int,
         comm_timing: int,
         lowbit_group=None,
+        bucket_numel: int = 4_000_000,
+        max_inflight_buckets: int = 1,
     ):
         self.device_mesh = device_mesh
         self.model = model
@@ -1264,15 +1277,19 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.micro_batch_counter = 0
         self.comm_handle: Optional[dist.Work] = None
         self.lowbit_group = lowbit_group
+        self.bucket_numel = max(1, int(bucket_numel))
+        self.max_inflight_buckets = max(1, int(max_inflight_buckets))
 
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
         ]
         self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
-        total_numel = int(sum(self.tensor_numels))
         dev = next(self.model.parameters()).device
         dtype = next(self.model.parameters()).dtype
-        self.flat_pred = torch.empty(total_numel, device=dev, dtype=dtype)
+        self.device = dev
+        self.dtype = dtype
+        self.buckets = self._build_buckets()
+        self._logged_bucket_schema = False
 
     def _trigger_condition(self) -> bool:
         if self.comm_timing == -1:
@@ -1280,86 +1297,137 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             return self.micro_batch_counter == trigger_batch
         return self.micro_batch_counter == self.comm_timing
 
+    def _build_buckets(self) -> List[List[_BucketEntry]]:
+        buckets: List[List[_BucketEntry]] = []
+        current: List[_BucketEntry] = []
+        current_numel = 0
+
+        for param_idx, numel in enumerate(self.tensor_numels):
+            start = 0
+            remaining = numel
+            while remaining > 0:
+                room = self.bucket_numel - current_numel
+                if room <= 0:
+                    buckets.append(current)
+                    current = []
+                    current_numel = 0
+                    room = self.bucket_numel
+
+                take = min(remaining, room)
+                current.append(_BucketEntry(param_idx, start, take))
+                current_numel += take
+                start += take
+                remaining -= take
+
+                if current_numel == self.bucket_numel:
+                    buckets.append(current)
+                    current = []
+                    current_numel = 0
+
+        if current:
+            buckets.append(current)
+        return buckets
+
+    def _log_bucket_schema_once(self) -> None:
+        if self._logged_bucket_schema:
+            return
+        self._logged_bucket_schema = True
+        total_numel = int(sum(self.tensor_numels))
+        logger.info(
+            "[polar-hook] ef_lowmem bucketed DP all-reduce: "
+            "total_numel=%s bucket_numel=%s buckets=%s max_inflight=%s "
+            "dtype=%s device=%s lowbit=%s",
+            total_numel,
+            self.bucket_numel,
+            len(self.buckets),
+            self.max_inflight_buckets,
+            self.dtype,
+            self.device,
+            self.lowbit_group is not None,
+        )
+
     @torch.no_grad()
-    def _pack_pred_and_seed_error_(self) -> None:
+    def _pack_bucket_and_update_error_(self, entries: List[_BucketEntry]) -> torch.Tensor:
+        bucket_numel = int(sum(entry.length for entry in entries))
+        buffer = torch.empty(bucket_numel, device=self.device, dtype=self.dtype)
+
         offset = 0
-        for i, p in enumerate(self.params):
-            n = self.tensor_numels[i]
-            flat_slice = self.flat_pred[offset: offset + n]
-            err = self.errors[i]
-
-            if p.grad is None and err is None:
-                flat_slice.zero_()
-                offset += n
-                continue
-
-            if err is None:
-                err = torch.empty_like(p)
-                self.errors[i] = err
+        for entry in entries:
+            p = self.params[entry.param_idx]
+            err = self.errors[entry.param_idx]
+            dst = buffer[offset: offset + entry.length]
 
             if p.grad is None:
-                flat_slice.copy_(err.reshape(-1))
+                if err is None:
+                    dst.zero_()
+                else:
+                    err_flat = err.reshape(-1)
+                    dst.copy_(err_flat[entry.start: entry.start + entry.length])
+                    err_flat[entry.start: entry.start + entry.length].neg_()
             else:
-                flat_slice.copy_(p.grad.reshape(-1))
-                flat_slice.add_(err.reshape(-1))
+                grad_flat = p.grad.reshape(-1)
+                dst.copy_(grad_flat[entry.start: entry.start + entry.length])
+                if err is not None:
+                    err_flat = err.reshape(-1)
+                    dst.add_(err_flat[entry.start: entry.start + entry.length])
+                    err_flat[entry.start: entry.start + entry.length].neg_()
 
-            # Store -sent in the error buffer. At step end we add final grad,
-            # yielding residual error = final_grad - sent.
-            err.reshape(-1).copy_(flat_slice)
-            err.neg_()
-            offset += n
+            offset += entry.length
+
+        return buffer
 
     @torch.no_grad()
-    def _finish_error_and_unpack_(self) -> None:
+    def _finish_bucket_(self, inflight: _InflightBucket) -> None:
+        _wait_and_average_flat(inflight.work, inflight.buffer, self.dp_group)
+
         offset = 0
-        for i, p in enumerate(self.params):
-            n = self.tensor_numels[i]
-            err = self.errors[i]
-
-            if err is None and p.grad is not None:
-                # No prediction was sent for this param at trigger time, but a
-                # later microbatch produced a gradient. Preserve it as residual.
-                err = torch.empty_like(p.grad)
-                err.copy_(p.grad)
-                self.errors[i] = err
-            elif err is not None and p.grad is not None:
-                err.add_(p.grad)
-
-            if p.grad is None or p.grad.numel() != n:
+        for entry in inflight.entries:
+            p = self.params[entry.param_idx]
+            if p.grad is None or p.grad.numel() != self.tensor_numels[entry.param_idx]:
                 p.grad = torch.empty_like(p)
-            p.grad.reshape(-1).copy_(self.flat_pred[offset: offset + n])
-            offset += n
+
+            grad_flat = p.grad.reshape(-1)
+            grad_flat[entry.start: entry.start + entry.length].copy_(
+                inflight.buffer[offset: offset + entry.length]
+            )
+            offset += entry.length
+
+    @torch.no_grad()
+    def _bucketed_all_reduce_(self) -> None:
+        self._log_bucket_schema_once()
+        inflight: List[_InflightBucket] = []
+
+        for entries in self.buckets:
+            buffer = self._pack_bucket_and_update_error_(entries)
+            work = _all_reduce_flat_async(
+                buffer,
+                group=self.dp_group,
+                lowbit_group=self.lowbit_group,
+            )
+            inflight.append(_InflightBucket(work=work, buffer=buffer, entries=entries))
+
+            if len(inflight) >= self.max_inflight_buckets:
+                self._finish_bucket_(inflight.pop(0))
+
+        while inflight:
+            self._finish_bucket_(inflight.pop(0))
 
     def __call__(self, *args, **kwds):
         if self._trigger_condition():
-            self._pack_pred_and_seed_error_()
-            self.comm_handle = _all_reduce_flat_async(
-                self.flat_pred,
-                group=self.dp_group,
-                lowbit_group=self.lowbit_group,
+            _trace_evidence(
+                "POLAR",
+                "ef_lowmem_bucketed_defer",
+                "meaning='ef_lowmem is in bucketed low-memory mode; it "
+                "defers DP communication until the pipeline step finishes to "
+                "avoid storing full-stage predicted gradients' "
+                f"bucket_numel={self.bucket_numel} "
+                f"max_inflight={self.max_inflight_buckets}",
             )
 
         self.micro_batch_counter += 1
 
         if self.micro_batch_counter == self.micro_batch_size:
-            if self.comm_handle is None:
-                # If comm_timing is outside the microbatch range, fall back to
-                # end-of-step EF. This preserves correctness with less overlap.
-                self._pack_pred_and_seed_error_()
-                self.comm_handle = _all_reduce_flat_async(
-                    self.flat_pred,
-                    group=self.dp_group,
-                    lowbit_group=self.lowbit_group,
-                )
-
-            if self.comm_handle is not None:
-                _wait_and_average_flat(
-                    self.comm_handle,
-                    self.flat_pred,
-                    self.dp_group,
-                )
-
-            self._finish_error_and_unpack_()
+            self._bucketed_all_reduce_()
             self.micro_batch_counter = 0
             self.comm_handle = None
 
