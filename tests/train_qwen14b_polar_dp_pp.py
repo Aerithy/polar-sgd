@@ -93,7 +93,7 @@ class StreamingTokenDataset(IterableDataset):
                 chunk = buffer[: self.seq_len + 1]
                 buffer = buffer[self.seq_len + 1 :]
                 input_ids = torch.tensor(chunk[:-1], dtype=torch.long)
-                labels = torch.tensor(chunk[1:], dtype=torch.long)
+                labels = input_ids.clone()
                 attention_mask = torch.ones_like(input_ids)
                 yield {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
 
@@ -246,6 +246,8 @@ def partition_qwen_model(
         else:
             # Stage 1+: input is hidden states
             hidden_states = input_ids_or_hidden
+            if torch.is_floating_point(hidden_states) and not hidden_states.requires_grad:
+                hidden_states.requires_grad_(True)
 
         # Get sequence length for position embeddings
         seq_length = hidden_states.shape[1]
@@ -410,7 +412,16 @@ def main():
     parser.add_argument("--use-flash-attn", action="store_true", default=True)
     parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--fp16", action="store_true", default=False)
-    parser.add_argument("--activation-checkpointing", action="store_true", default=True)
+    parser.add_argument(
+        "--activation-checkpointing",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable HF gradient checkpointing. Disabled by default for PP "
+            "debugging because checkpoint requires PP boundary activations to "
+            "carry requires_grad."
+        ),
+    )
     parser.add_argument(
         "--init-from-pretrained",
         action="store_true",

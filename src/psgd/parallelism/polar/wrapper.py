@@ -382,6 +382,7 @@ class PolarParallel:
             f"baseline_mode={self.baseline_mode} use_local_sgd={self.use_local_sgd}"
         )
         self._debug_check_optimizer_parameters("after_optimizer_init")
+        self._log_stage_memory_and_params("after_optimizer_init")
         print(
             f"[PolarParallel] version={POLAR_WRAPPER_FIX_VERSION} "
             f"rank={dist.get_rank()} stage={self.stage_idx}",
@@ -601,6 +602,60 @@ class PolarParallel:
             flush=True,
         )
 
+    @staticmethod
+    def _format_bytes(num_bytes: int) -> str:
+        gib = float(num_bytes) / (1024.0 ** 3)
+        return f"{gib:.2f}GiB"
+
+    def _log_stage_memory_and_params(self, where: str) -> None:
+        buckets = {
+            "embed": 0,
+            "layers": 0,
+            "norm": 0,
+            "lm_head": 0,
+            "other": 0,
+        }
+        param_tensors = 0
+        dtensor_params = 0
+
+        for name, param in self.stage_model.named_parameters():
+            param_tensors += 1
+            tensor = param
+            if hasattr(tensor, "to_local"):
+                dtensor_params += 1
+                tensor = tensor.to_local()
+            numel = int(tensor.numel())
+
+            if name.startswith("model.embed_tokens"):
+                buckets["embed"] += numel
+            elif name.startswith("model.layers"):
+                buckets["layers"] += numel
+            elif name.startswith("model.norm") or name.startswith("model.final_norm"):
+                buckets["norm"] += numel
+            elif name.startswith("lm_head"):
+                buckets["lm_head"] += numel
+            else:
+                buckets["other"] += numel
+
+        allocated = reserved = max_allocated = 0
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(self.device)
+            reserved = torch.cuda.memory_reserved(self.device)
+            max_allocated = torch.cuda.max_memory_allocated(self.device)
+
+        print(
+            f"[stage_mem][rank {dist.get_rank()}][stage {self.stage_idx}] "
+            f"{where} local_params={sum(buckets.values())} "
+            f"param_tensors={param_tensors} dtensor_params={dtensor_params} "
+            f"embed={buckets['embed']} layers={buckets['layers']} "
+            f"norm={buckets['norm']} lm_head={buckets['lm_head']} "
+            f"other={buckets['other']} "
+            f"cuda_alloc={self._format_bytes(allocated)} "
+            f"cuda_reserved={self._format_bytes(reserved)} "
+            f"cuda_max_alloc={self._format_bytes(max_allocated)}",
+            flush=True,
+        )
+
     def _debug_batch(self, batch_idx: int, input_ids, labels, attention_mask) -> None:
         debug_steps = int(getattr(self.args, "debug_nan_steps", 0) or 0)
         if batch_idx >= debug_steps:
@@ -655,7 +710,7 @@ class PolarParallel:
             torch.nn.init.ones_(module.weight)
 
     def _apply_tensor_parallel_if_needed(self) -> None:
-        """Shard Qwen decoder-layer linears across the optional TP mesh."""
+        """Shard Qwen decoder-layer linears and the final LM head across TP."""
         if self.tp_mesh is None or self.tp_mesh.size() <= 1:
             return
 
@@ -702,6 +757,12 @@ class PolarParallel:
                     f"{prefix}.mlp.up_proj": ColwiseParallel(),
                     f"{prefix}.mlp.down_proj": RowwiseParallel(),
                 }
+            )
+
+        if getattr(self.stage_model, "lm_head", None) is not None:
+            tp_plan["lm_head"] = ColwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Replicate(),
             )
 
         if not tp_plan:
@@ -1169,6 +1230,11 @@ class PolarParallel:
                     )
 
                 self.optimizer.step()
+                debug_steps = int(getattr(self.args, "debug_nan_steps", 0) or 0)
+                if global_step == 0 or batch_idx < debug_steps:
+                    self._log_stage_memory_and_params(
+                        f"after_optimizer_step_{global_step}"
+                    )
                 self.local_step_counter += 1
                 step_idx = global_step
                 global_step += 1
