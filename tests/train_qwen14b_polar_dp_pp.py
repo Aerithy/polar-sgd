@@ -223,6 +223,13 @@ def partition_qwen_model(
         if "seq_len" in params:
             return rotary_emb(hidden_states, seq_len=seq_length)
         return rotary_emb(hidden_states, position_ids)
+
+    def layer_attention_mask(attention_mask):
+        if attention_mask is None:
+            return None
+        if attention_mask.dim() == 2 and bool(attention_mask.all().item()):
+            return None
+        return attention_mask
     
     # Custom forward method for partitioned model with proper RoPE handling
     def custom_forward(input_ids_or_hidden, attention_mask=None):
@@ -273,15 +280,17 @@ def partition_qwen_model(
                 rotary_emb, hidden_states, position_ids, seq_length
             )
 
+        decoder_attention_mask = layer_attention_mask(attention_mask)
+
         # Pass through layers
-        for layer in model.model.layers:
+        for layer_idx, layer in enumerate(model.model.layers):
             if isinstance(layer, torch.nn.Identity):
                 hidden_states = layer(hidden_states)
             else:
                 # Pass position_embeddings to Qwen2 layers
                 layer_outputs = layer(
                     hidden_states, 
-                    attention_mask=attention_mask,
+                    attention_mask=decoder_attention_mask,
                     position_embeddings=position_embeddings
                 )
                 # Qwen2 layers return a tuple (hidden_states, attention_weights)
@@ -289,6 +298,15 @@ def partition_qwen_model(
                     hidden_states = layer_outputs[0]
                 else:
                     hidden_states = layer_outputs
+                if debug_forward and debug_count < int(debug_nan_steps):
+                    hs_float = hidden_states.detach().float()
+                    if not bool(torch.isfinite(hs_float).all().item()):
+                        print(
+                            f"[debug_forward][stage {stage_idx}] nonfinite after "
+                            f"local_layer={layer_idx}",
+                            flush=True,
+                        )
+                        break
 
         # Apply final norm if present
         if hasattr(model.model, 'norm') and model.model.norm is not None:
