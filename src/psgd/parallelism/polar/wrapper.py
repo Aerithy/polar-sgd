@@ -311,6 +311,10 @@ class PolarParallel:
         self.stage_idx = stage_idx
         self.stage_model = stage_model
         self._is_llama_stage = "Llama" in type(self.stage_model).__name__
+        self._uses_hf_transformer_init = any(
+            family in type(self.stage_model).__name__
+            for family in ("Llama", "Qwen", "Mistral", "Mixtral")
+        )
         if bool(getattr(self.args, "init_from_pretrained", False)):
             self.stage_model.to(self.device)
         else:
@@ -540,15 +544,21 @@ class PolarParallel:
         max_abs = 0.0
         first_bad = None
         for name, param in self.stage_model.named_parameters():
-            total += param.numel()
-            finite = torch.isfinite(param).all()
+            tensor = param
+            if hasattr(tensor, "to_local"):
+                tensor = tensor.to_local()
+            total += tensor.numel()
+            finite = torch.isfinite(tensor).all()
             if not bool(finite.item()):
-                bad_count = int((~torch.isfinite(param)).sum().item())
+                bad_count = int((~torch.isfinite(tensor)).sum().item())
                 nonfinite += bad_count
                 if first_bad is None:
                     first_bad = name
-            if param.numel() > 0:
-                max_abs = max(max_abs, float(param.detach().nan_to_num().abs().max().item()))
+            if tensor.numel() > 0:
+                max_abs = max(
+                    max_abs,
+                    float(tensor.detach().nan_to_num().abs().max().item()),
+                )
 
         print(
             f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
@@ -589,7 +599,7 @@ class PolarParallel:
         )
 
     def _reset_module_parameters(self, module: torch.nn.Module) -> None:
-        if self._is_llama_stage:
+        if self._uses_hf_transformer_init:
             if isinstance(module, torch.nn.Linear):
                 torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 if module.bias is not None:

@@ -364,6 +364,12 @@ def main():
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--save-dir", type=str, default="checkpoints/qwen2_5_14b_instruct")
+    parser.add_argument(
+        "--debug-nan-steps",
+        type=int,
+        default=0,
+        help="Print parameter and batch finite/range checks for the first N steps.",
+    )
     
     # Data loader
     parser.add_argument("--num-workers", type=int, default=2)
@@ -603,7 +609,7 @@ def main():
         shift_logits = output[..., :-1, :].contiguous()
         shift_labels = target[..., 1:].contiguous()
         return F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_logits.float().view(-1, shift_logits.size(-1)),
             shift_labels.view(-1),
             ignore_index=tokenizer.pad_token_id,
         )
