@@ -671,6 +671,8 @@ class PolarParallel:
         except TypeError:
             parallelize_module(self.stage_model, self.tp_mesh, tp_plan)
 
+        self._adjust_tensor_parallel_attention_metadata()
+
         logger.info(
             "[tensor-parallel] rank=%s stage=%s tp_size=%s sharded_modules=%s",
             dist.get_rank(),
@@ -678,6 +680,44 @@ class PolarParallel:
             self.tp_mesh.size(),
             len(tp_plan),
         )
+
+    def _adjust_tensor_parallel_attention_metadata(self) -> None:
+        """Make HF attention modules interpret TP-sharded q/k/v outputs locally."""
+        tp_size = int(self.tp_mesh.size()) if self.tp_mesh is not None else 1
+        if tp_size <= 1:
+            return
+
+        for layer in self.stage_model.model.layers:
+            if isinstance(layer, torch.nn.Identity):
+                continue
+            attn = getattr(layer, "self_attn", None)
+            if attn is None:
+                continue
+
+            global_num_heads = getattr(attn, "num_heads", None)
+            if isinstance(global_num_heads, int):
+                if global_num_heads % tp_size != 0:
+                    raise RuntimeError(
+                        f"attention num_heads={global_num_heads} must be "
+                        f"divisible by tp_size={tp_size}"
+                    )
+                attn.num_heads = global_num_heads // tp_size
+
+            global_kv_heads = getattr(attn, "num_key_value_heads", None)
+            if isinstance(global_kv_heads, int):
+                if global_kv_heads % tp_size != 0:
+                    raise RuntimeError(
+                        f"attention num_key_value_heads={global_kv_heads} "
+                        f"must be divisible by tp_size={tp_size}"
+                    )
+                attn.num_key_value_heads = global_kv_heads // tp_size
+
+            if hasattr(attn, "num_key_value_groups") and isinstance(
+                getattr(attn, "num_heads", None), int
+            ) and isinstance(getattr(attn, "num_key_value_heads", None), int):
+                attn.num_key_value_groups = (
+                    attn.num_heads // attn.num_key_value_heads
+                )
 
     @torch.no_grad()
     def _broadcast_stage_parameters_from_dp_root(self) -> None:

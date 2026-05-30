@@ -175,6 +175,49 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     original_model = model.model
     rope_theta = getattr(config, 'rope_theta', 10000.0)
     max_position_embeddings = getattr(config, 'max_position_embeddings', 4096)
+
+    def get_fallback_rotary_embedding(device):
+        rotary_emb = getattr(model.model, "_polar_rotary_emb", None)
+        if rotary_emb is not None:
+            return rotary_emb.to(device)
+
+        import inspect
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+
+        signature = inspect.signature(Qwen2RotaryEmbedding.__init__)
+        params = signature.parameters
+        kwargs = {}
+        if "config" in params:
+            kwargs["config"] = config
+            if "device" in params:
+                kwargs["device"] = device
+            rotary_emb = Qwen2RotaryEmbedding(**kwargs)
+        else:
+            head_dim = config.hidden_size // config.num_attention_heads
+            if "max_position_embeddings" in params:
+                kwargs["max_position_embeddings"] = max_position_embeddings
+            if "rope_theta" in params:
+                kwargs["rope_theta"] = rope_theta
+            elif "base" in params:
+                kwargs["base"] = rope_theta
+            if "device" in params:
+                kwargs["device"] = device
+            rotary_emb = Qwen2RotaryEmbedding(head_dim, **kwargs)
+
+        rotary_emb = rotary_emb.to(device)
+        model.model._polar_rotary_emb = rotary_emb
+        return rotary_emb
+
+    def apply_rotary_embedding(rotary_emb, hidden_states, position_ids, seq_length):
+        import inspect
+
+        signature = inspect.signature(rotary_emb.forward)
+        params = signature.parameters
+        if "position_ids" in params:
+            return rotary_emb(hidden_states, position_ids)
+        if "seq_len" in params:
+            return rotary_emb(hidden_states, seq_len=seq_length)
+        return rotary_emb(hidden_states, position_ids)
     
     # Custom forward method for partitioned model with proper RoPE handling
     def custom_forward(input_ids_or_hidden, attention_mask=None):
@@ -196,18 +239,18 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
         position_ids = torch.arange(seq_length, device=hidden_states.device).unsqueeze(0).repeat(batch_size, 1)
         
         if hasattr(model.model, 'rotary_emb') and model.model.rotary_emb is not None:
-            position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+            position_embeddings = apply_rotary_embedding(
+                model.model.rotary_emb, hidden_states, position_ids, seq_length
+            )
         elif hasattr(original_model, 'rotary_emb') and original_model.rotary_emb is not None:
-            position_embeddings = original_model.rotary_emb(hidden_states, position_ids)
+            position_embeddings = apply_rotary_embedding(
+                original_model.rotary_emb, hidden_states, position_ids, seq_length
+            )
         else:
-            # Fallback: create rotary embedding if not found
-            from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
-            rotary_emb = Qwen2RotaryEmbedding(
-                config.hidden_size // config.num_attention_heads,
-                rope_theta=rope_theta,
-                max_position_embeddings=max_position_embeddings
-            ).to(hidden_states.device)
-            position_embeddings = rotary_emb(hidden_states, position_ids)
+            rotary_emb = get_fallback_rotary_embedding(hidden_states.device)
+            position_embeddings = apply_rotary_embedding(
+                rotary_emb, hidden_states, position_ids, seq_length
+            )
 
         # Pass through layers
         for layer in model.model.layers:
