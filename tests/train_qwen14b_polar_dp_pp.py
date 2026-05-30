@@ -42,6 +42,17 @@ def import_bitscom():
         return bitscom
 
 
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value!r}")
+
+
 @dataclass
 class TrainConfig:
     model_name: str = "Qwen/Qwen2.5-14B-Instruct"
@@ -194,6 +205,11 @@ def partition_qwen_model(
         if rotary_emb is not None:
             return rotary_emb.to(device)
 
+        rotary_emb = build_rotary_embedding(device)
+        model.model._polar_rotary_emb = rotary_emb
+        return rotary_emb
+
+    def build_rotary_embedding(device):
         import inspect
         from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
 
@@ -218,8 +234,25 @@ def partition_qwen_model(
             rotary_emb = Qwen2RotaryEmbedding(head_dim, **kwargs)
 
         rotary_emb = rotary_emb.to(device)
-        model.model._polar_rotary_emb = rotary_emb
         return rotary_emb
+
+    def ensure_layer_rotary_embedding(layer, device):
+        self_attn = getattr(layer, "self_attn", None)
+        if self_attn is None or not hasattr(self_attn, "rotary_emb"):
+            return
+
+        rotary_emb = getattr(self_attn, "rotary_emb", None)
+        needs_rebuild = rotary_emb is None
+        if rotary_emb is not None:
+            for buffer in rotary_emb.buffers():
+                if torch.is_floating_point(buffer) and not bool(torch.isfinite(buffer).all().item()):
+                    needs_rebuild = True
+                    break
+
+        if needs_rebuild:
+            self_attn.rotary_emb = build_rotary_embedding(device)
+        else:
+            self_attn.rotary_emb = rotary_emb.to(device)
 
     def apply_rotary_embedding(rotary_emb, hidden_states, position_ids, seq_length):
         import inspect
@@ -295,6 +328,7 @@ def partition_qwen_model(
             if isinstance(layer, torch.nn.Identity):
                 hidden_states = layer(hidden_states)
             else:
+                ensure_layer_rotary_embedding(layer, hidden_states.device)
                 # Pass position_embeddings to Qwen2 layers
                 layer_outputs = layer(
                     hidden_states, 
@@ -504,6 +538,12 @@ def main():
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--save-dir", type=str, default="checkpoints/qwen2_5_14b_instruct")
+    parser.add_argument("--run-label", type=str, default="")
+    parser.add_argument(
+        "--step-log-dir",
+        type=str,
+        default="experiments/quantization/outputs/step_csv",
+    )
     parser.add_argument(
         "--debug-nan-steps",
         type=int,
@@ -544,7 +584,7 @@ def main():
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--micro-batches", type=int, default=1)
     parser.add_argument("--comm-timing", type=int, default=-1)
-    parser.add_argument("--using-polar", type=bool, default=True)
+    parser.add_argument("--using-polar", type=str_to_bool, default=True)
     
     # Polar hooks
     parser.add_argument(

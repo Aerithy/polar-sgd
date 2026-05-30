@@ -134,6 +134,12 @@ class _InflightBucket:
     entries: List[_BucketEntry]
 
 
+@dataclass
+class _OffloadedBucket:
+    buffer: torch.Tensor
+    entries: List[_BucketEntry]
+
+
 class GpipeHook:
     """Consider Gpipe automatically adapt gradient accumulation mechanism, we do not need to accumulate gradient manually
     """
@@ -1248,10 +1254,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
       - Never build a full-stage flat buffer. Instead, build deterministic
         buckets and all-reduce at most `max_inflight_buckets` bucket buffers.
 
-    This low-memory path intentionally communicates at the end of the pipeline
-    step. Mid-step communication would require storing the reduced prediction
-    until later microbatches finish accumulating into `param.grad`, which brings
-    back the same full-stage memory pressure this hook is meant to avoid.
+    At the trigger microbatch, send `current_grad + error` bucket-by-bucket and
+    offload reduced predictions to CPU. At step end, update residual
+    `error = final_grad - sent` and write the reduced prediction back to
+    `param.grad`. This restores POLAR's prediction/error-feedback semantics
+    without keeping a full-stage prediction buffer on GPU.
     """
 
     def __init__(
@@ -1293,6 +1300,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.dtype = dtype
         self.buckets = self._build_buckets()
         self._logged_bucket_schema = False
+        self.offloaded_pred_buckets: Optional[List[_OffloadedBucket]] = None
 
     @staticmethod
     def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1405,6 +1413,43 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         return buffer
 
     @torch.no_grad()
+    def _pack_pred_bucket_and_seed_error_(self, entries: List[_BucketEntry]) -> torch.Tensor:
+        bucket_numel = int(sum(entry.length for entry in entries))
+        buffer = torch.empty(bucket_numel, device=self.device, dtype=self.dtype)
+
+        offset = 0
+        for entry in entries:
+            p = self.params[entry.param_idx]
+            err = self.errors[entry.param_idx]
+            dst = buffer[offset: offset + entry.length]
+            grad = self._local_grad(p)
+
+            if grad is None and err is None:
+                dst.zero_()
+                offset += entry.length
+                continue
+
+            if err is None:
+                err = torch.empty_like(self._local_tensor(p.data))
+                self.errors[entry.param_idx] = err
+
+            err_flat = err.reshape(-1)
+            if grad is None:
+                dst.copy_(err_flat[entry.start: entry.start + entry.length])
+            else:
+                grad_flat = grad.reshape(-1)
+                dst.copy_(grad_flat[entry.start: entry.start + entry.length])
+                dst.add_(err_flat[entry.start: entry.start + entry.length])
+
+            # Seed residual with -sent. Later microbatches continue to
+            # accumulate into param.grad; at step end we add final local grad.
+            err_flat[entry.start: entry.start + entry.length].copy_(dst)
+            err_flat[entry.start: entry.start + entry.length].neg_()
+            offset += entry.length
+
+        return buffer
+
+    @torch.no_grad()
     def _finish_bucket_(self, inflight: _InflightBucket) -> None:
         _wait_and_average_flat(inflight.work, inflight.buffer, self.dp_group)
 
@@ -1438,22 +1483,74 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         while inflight:
             self._finish_bucket_(inflight.pop(0))
 
+    @torch.no_grad()
+    def _bucketed_predict_to_cpu_(self) -> None:
+        self._log_bucket_schema_once()
+        self.offloaded_pred_buckets = []
+
+        for entries in self.buckets:
+            buffer = self._pack_pred_bucket_and_seed_error_(entries)
+            work = _all_reduce_flat_async(
+                buffer,
+                group=self.dp_group,
+                lowbit_group=self.lowbit_group,
+            )
+            _wait_and_average_flat(work, buffer, self.dp_group)
+            self.offloaded_pred_buckets.append(
+                _OffloadedBucket(
+                    buffer=buffer.detach().to("cpu"),
+                    entries=entries,
+                )
+            )
+            del buffer
+
+    @torch.no_grad()
+    def _finish_offloaded_prediction_(self) -> None:
+        if self.offloaded_pred_buckets is None:
+            return
+
+        for offloaded in self.offloaded_pred_buckets:
+            device_buffer = offloaded.buffer.to(self.device)
+            offset = 0
+            for entry in offloaded.entries:
+                p = self.params[entry.param_idx]
+                err = self.errors[entry.param_idx]
+                grad = self._local_grad(p)
+                if err is not None and grad is not None:
+                    err_flat = err.reshape(-1)
+                    grad_flat = grad.reshape(-1)
+                    err_flat[entry.start: entry.start + entry.length].add_(
+                        grad_flat[entry.start: entry.start + entry.length]
+                    )
+
+                out_grad = self._ensure_local_grad_(p, entry.param_idx)
+                out_grad.reshape(-1)[entry.start: entry.start + entry.length].copy_(
+                    device_buffer[offset: offset + entry.length]
+                )
+                offset += entry.length
+
+        self.offloaded_pred_buckets = None
+
     def __call__(self, *args, **kwds):
-        if self._trigger_condition():
+        if self._trigger_condition() and self.offloaded_pred_buckets is None:
             _trace_evidence(
                 "POLAR",
-                "ef_lowmem_bucketed_defer",
-                "meaning='ef_lowmem is in bucketed low-memory mode; it "
-                "defers DP communication until the pipeline step finishes to "
-                "avoid storing full-stage predicted gradients' "
+                "ef_lowmem_bucketed_predict",
+                "meaning='ef_lowmem sends bucketed predicted gradients at "
+                "the configured POLAR trigger and offloads reduced buckets "
+                "to CPU until the pipeline step finishes' "
                 f"bucket_numel={self.bucket_numel} "
                 f"max_inflight={self.max_inflight_buckets}",
             )
+            self._bucketed_predict_to_cpu_()
 
         self.micro_batch_counter += 1
 
         if self.micro_batch_counter == self.micro_batch_size:
-            self._bucketed_all_reduce_()
+            if self.offloaded_pred_buckets is None:
+                self._bucketed_all_reduce_()
+            else:
+                self._finish_offloaded_prediction_()
             self.micro_batch_counter = 0
             self.comm_handle = None
 

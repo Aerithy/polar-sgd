@@ -979,6 +979,12 @@ class PolarParallel:
             offset += numel
         self._pending_local_sgd = None
 
+    @staticmethod
+    def _as_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
     def _allreduce_dp_grads_(self):
         """All-reduce grads across the DP group (SUM then average).
 
@@ -991,8 +997,11 @@ class PolarParallel:
         for p in self.stage.submod.parameters():
             if p.grad is None:
                 continue
-            dist.all_reduce(p.grad, op=dist.ReduceOp.SUM, group=dp_group)
-            p.grad.div_(dp_size)
+            grad = p.grad
+            if hasattr(grad, "to_local"):
+                grad = grad.to_local()
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_group)
+            grad.div_(dp_size)
 
     @torch.no_grad()
     def _evaluate_val_loss_ppl(self):
@@ -1066,8 +1075,9 @@ class PolarParallel:
         return avg_loss, ppl
 
     def train(self):
+        using_polar = self._as_bool(getattr(self.args, "using_polar", True))
         # Register hook only if not using Local-SGD (Polar gradient prediction)
-        if not self.use_local_sgd:
+        if using_polar and not self.use_local_sgd:
             polar_hook = getattr(self.args, "polar_hook", "io")
             polar_beta = float(getattr(self.args, "polar_beta", 0.9))
             lowbit_group = getattr(self, "lowbit_group", None)
@@ -1237,6 +1247,11 @@ class PolarParallel:
                     f"step={global_step} batch={batch_idx} "
                     f"stage={self.stage_idx} schedule.step exit"
                 )
+
+                if not using_polar and self.baseline_mode in ("manual", "ddp"):
+                    # Dense DP synchronization at the usual DDP point, after
+                    # 1F1B backward has completed for this pipeline stage.
+                    self._allreduce_dp_grads_()
 
                 if self._has_nonfinite_grads(self.stage.submod):
                     if self.optimizer:
