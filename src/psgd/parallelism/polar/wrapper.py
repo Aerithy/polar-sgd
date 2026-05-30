@@ -757,9 +757,41 @@ class PolarParallel:
         for p in module.parameters():
             if p.grad is None:
                 continue
-            if not torch.isfinite(p.grad).all():
+            grad = p.grad
+            if hasattr(grad, "to_local"):
+                grad = grad.to_local()
+            if not torch.isfinite(grad).all():
                 return True
         return False
+
+    @torch.no_grad()
+    def _clip_grad_norm_local_(self, module: torch.nn.Module, max_norm: float) -> torch.Tensor:
+        """Clip gradients without mixing Tensor and DTensor foreach kernels."""
+        grads = []
+        for p in module.parameters():
+            if p.grad is None:
+                continue
+            grad = p.grad
+            if hasattr(grad, "to_local"):
+                grad = grad.to_local()
+            grads.append(grad)
+
+        if not grads:
+            return torch.tensor(0.0, device=self.device)
+
+        total = torch.zeros((), device=grads[0].device, dtype=torch.float32)
+        for grad in grads:
+            total.add_(grad.detach().float().pow(2).sum())
+        total_norm = torch.sqrt(total)
+        clip_coef = torch.tensor(
+            float(max_norm),
+            device=total_norm.device,
+            dtype=total_norm.dtype,
+        ) / (total_norm + 1e-6)
+        if clip_coef < 1:
+            for grad in grads:
+                grad.mul_(clip_coef.to(dtype=grad.dtype))
+        return total_norm
 
     def _sync_parameters_local_sgd(self):
         """
@@ -1080,8 +1112,8 @@ class PolarParallel:
                     continue
 
                 if grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.stage.submod.parameters(),
+                    self._clip_grad_norm_local_(
+                        self.stage.submod,
                         max_norm=grad_clip_norm,
                     )
 
@@ -1349,8 +1381,8 @@ class PolarParallel:
                     continue
 
                 if grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        stage_mod.parameters(),
+                    self._clip_grad_norm_local_(
+                        stage_mod,
                         max_norm=grad_clip_norm,
                     )
 
