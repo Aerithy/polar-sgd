@@ -543,8 +543,10 @@ class PolarParallel:
 
         total = 0
         nonfinite = 0
+        buffer_nonfinite = 0
         max_abs = 0.0
         first_bad = None
+        first_bad_buffer = None
         param_count = 0
         dtensor_count = 0
         for name, param in self.stage_model.named_parameters():
@@ -566,11 +568,33 @@ class PolarParallel:
                     float(tensor.detach().nan_to_num().abs().max().item()),
                 )
 
+        buffer_count = 0
+        for name, buffer in self.stage_model.named_buffers():
+            buffer_count += 1
+            tensor = buffer
+            if hasattr(tensor, "to_local"):
+                tensor = tensor.to_local()
+            if not torch.is_floating_point(tensor):
+                continue
+            finite = torch.isfinite(tensor).all()
+            if not bool(finite.item()):
+                bad_count = int((~torch.isfinite(tensor)).sum().item())
+                buffer_nonfinite += bad_count
+                if first_bad_buffer is None:
+                    first_bad_buffer = name
+            if tensor.numel() > 0:
+                max_abs = max(
+                    max_abs,
+                    float(tensor.detach().nan_to_num().abs().max().item()),
+                )
+
         print(
             f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
             f"{where} local_params_total={total} param_tensors={param_count} "
             f"dtensor_params={dtensor_count} nonfinite_params={nonfinite} "
-            f"max_abs={max_abs:.6g} first_bad={first_bad}",
+            f"buffer_tensors={buffer_count} nonfinite_buffers={buffer_nonfinite} "
+            f"max_abs={max_abs:.6g} first_bad={first_bad} "
+            f"first_bad_buffer={first_bad_buffer}",
             flush=True,
         )
 

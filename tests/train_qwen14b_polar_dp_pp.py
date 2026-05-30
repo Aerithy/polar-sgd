@@ -180,6 +180,10 @@ def partition_qwen_model(
     original_model = model.model
     rope_theta = getattr(config, 'rope_theta', 10000.0)
     max_position_embeddings = getattr(config, 'max_position_embeddings', 4096)
+    # The model is later materialized with to_empty(); HF RoPE buffers created
+    # on meta can become uninitialized device buffers. Rebuild RoPE lazily.
+    if hasattr(model.model, "rotary_emb"):
+        model.model.rotary_emb = None
 
     def get_fallback_rotary_embedding(device):
         rotary_emb = getattr(model.model, "_polar_rotary_emb", None)
