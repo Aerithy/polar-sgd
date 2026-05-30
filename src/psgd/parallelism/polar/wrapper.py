@@ -710,12 +710,12 @@ class PolarParallel:
             torch.nn.init.ones_(module.weight)
 
     def _apply_tensor_parallel_if_needed(self) -> None:
-        """Shard Qwen decoder-layer linears and the final LM head across TP."""
+        """Shard Qwen decoder-layer linears and final LM head across TP."""
         if self.tp_mesh is None or self.tp_mesh.size() <= 1:
             return
 
         try:
-            from torch.distributed.tensor import Replicate
+            from torch.distributed.tensor import Replicate, Shard
             from torch.distributed.tensor.parallel import (
                 ColwiseParallel,
                 RowwiseParallel,
@@ -762,7 +762,7 @@ class PolarParallel:
         if getattr(self.stage_model, "lm_head", None) is not None:
             tp_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Replicate(),
+                output_layouts=Shard(-1),
             )
 
         if not tp_plan:

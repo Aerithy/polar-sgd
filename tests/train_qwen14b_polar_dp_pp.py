@@ -366,6 +366,61 @@ def build_tokenizer(cfg: TrainConfig):
     return tokenizer
 
 
+def vocab_parallel_lm_loss(output, target, ignore_index: int, tp_mesh):
+    """Causal LM loss for either full logits or TP vocab-sharded DTensor logits."""
+    shift_labels = target[..., 1:].contiguous()
+
+    if not hasattr(output, "to_local"):
+        shift_logits = output[..., :-1, :].contiguous()
+        return F.cross_entropy(
+            shift_logits.float().view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=ignore_index,
+        )
+
+    if tp_mesh is None:
+        raise RuntimeError("DTensor logits require a TP mesh for vocab-parallel loss.")
+
+    local_logits = output.to_local()[..., :-1, :].float().contiguous()
+    flat_logits = local_logits.view(-1, local_logits.size(-1))
+    flat_labels = shift_labels.view(-1)
+
+    tp_rank = int(tp_mesh.get_local_rank())
+    tp_size = int(tp_mesh.size())
+    global_vocab_size = int(output.size(-1))
+    base = global_vocab_size // tp_size
+    remainder = global_vocab_size % tp_size
+    vocab_start = tp_rank * base + min(tp_rank, remainder)
+    vocab_end = vocab_start + base + (1 if tp_rank < remainder else 0)
+
+    valid = flat_labels.ne(ignore_index)
+    in_local_vocab = valid & flat_labels.ge(vocab_start) & flat_labels.lt(vocab_end)
+    local_target = (flat_labels - vocab_start).clamp(
+        min=0,
+        max=max(vocab_end - vocab_start - 1, 0),
+    )
+
+    local_max = flat_logits.max(dim=-1).values
+    global_max = local_max.clone()
+    dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=tp_mesh.get_group())
+
+    exp_sum = torch.exp(flat_logits - global_max.unsqueeze(-1)).sum(dim=-1)
+    dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=tp_mesh.get_group())
+
+    target_logits = torch.zeros_like(global_max)
+    if in_local_vocab.any():
+        target_logits[in_local_vocab] = flat_logits[
+            in_local_vocab,
+            local_target[in_local_vocab],
+        ]
+    dist.all_reduce(target_logits, op=dist.ReduceOp.SUM, group=tp_mesh.get_group())
+
+    losses = torch.log(exp_sum.clamp_min(1e-20)) + global_max - target_logits
+    if valid.any():
+        return losses[valid].mean()
+    return losses.sum() * 0.0
+
+
 # -----------------------------
 # Main Training Loop
 # -----------------------------
@@ -654,12 +709,11 @@ def main():
 
     def loss_fn(output, target):
         """LM loss function with padding mask."""
-        shift_logits = output[..., :-1, :].contiguous()
-        shift_labels = target[..., 1:].contiguous()
-        return F.cross_entropy(
-            shift_logits.float().view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
+        return vocab_parallel_lm_loss(
+            output,
+            target,
             ignore_index=tokenizer.pad_token_id,
+            tp_mesh=device_mesh["tp"] if tp_size > 1 else None,
         )
     
     trainer = PolarParallel(
