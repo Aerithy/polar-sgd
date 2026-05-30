@@ -712,6 +712,15 @@ class PolarParallel:
                     )
                 attn.num_key_value_heads = global_kv_heads // tp_size
 
+            global_hidden_size = getattr(attn, "hidden_size", None)
+            if isinstance(global_hidden_size, int):
+                if global_hidden_size % tp_size != 0:
+                    raise RuntimeError(
+                        f"attention hidden_size={global_hidden_size} must be "
+                        f"divisible by tp_size={tp_size}"
+                    )
+                attn.hidden_size = global_hidden_size // tp_size
+
             if hasattr(attn, "num_key_value_groups") and isinstance(
                 getattr(attn, "num_heads", None), int
             ) and isinstance(getattr(attn, "num_key_value_heads", None), int):
