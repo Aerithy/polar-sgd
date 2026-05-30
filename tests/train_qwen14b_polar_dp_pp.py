@@ -384,7 +384,13 @@ def build_tokenizer(cfg: TrainConfig):
     return tokenizer
 
 
-def vocab_parallel_lm_loss(output, target, ignore_index: int, tp_mesh):
+def vocab_parallel_lm_loss(
+    output,
+    target,
+    ignore_index: int,
+    tp_mesh,
+    debug: bool = False,
+):
     """Causal LM loss for either full logits or TP vocab-sharded DTensor logits."""
     shift_labels = target[..., 1:].contiguous()
 
@@ -434,6 +440,25 @@ def vocab_parallel_lm_loss(output, target, ignore_index: int, tp_mesh):
     dist.all_reduce(target_logits, op=dist.ReduceOp.SUM, group=tp_mesh.get_group())
 
     losses = torch.log(exp_sum.clamp_min(1e-20)) + global_max - target_logits
+    if debug:
+        rank = dist.get_rank()
+        local_finite = bool(torch.isfinite(flat_logits).all().item())
+        losses_finite = bool(torch.isfinite(losses).all().item())
+        print(
+            f"[debug_loss][rank {rank}] "
+            f"dtensor={hasattr(output, 'to_local')} "
+            f"logits_finite={local_finite} losses_finite={losses_finite} "
+            f"logits_min={float(flat_logits.nan_to_num().min().item()):.6g} "
+            f"logits_max={float(flat_logits.nan_to_num().max().item()):.6g} "
+            f"global_max_min={float(global_max.nan_to_num().min().item()):.6g} "
+            f"global_max_max={float(global_max.nan_to_num().max().item()):.6g} "
+            f"exp_sum_min={float(exp_sum.nan_to_num().min().item()):.6g} "
+            f"exp_sum_max={float(exp_sum.nan_to_num().max().item()):.6g} "
+            f"valid={int(valid.sum().item())} "
+            f"local_targets={int(in_local_vocab.sum().item())} "
+            f"vocab_range=[{vocab_start},{vocab_end})",
+            flush=True,
+        )
     if valid.any():
         return losses[valid].mean()
     return losses.sum() * 0.0
@@ -732,6 +757,7 @@ def main():
             target,
             ignore_index=tokenizer.pad_token_id,
             tp_mesh=device_mesh["tp"] if tp_size > 1 else None,
+            debug=int(args.debug_nan_steps or 0) > 0,
         )
     
     trainer = PolarParallel(
