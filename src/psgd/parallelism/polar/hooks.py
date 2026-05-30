@@ -1567,6 +1567,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             self.micro_batch_counter = 0
             self.comm_handle = None
 
+    def reset_state(self) -> None:
+        self.offloaded_pred_buckets = None
+        self.micro_batch_counter = 0
+        self.comm_handle = None
+
 
 class PolarGpipeScalingOnlyHook:
     """Ablation: gradient scaling only (no error-feedback).

@@ -407,6 +407,7 @@ class PolarParallel:
         self.errors = [None for param in self.stage.submod.parameters()]
         self.gradients = [param.grad for param in self.stage.submod.parameters()]
         self.grads_pred = [None for param in self.stage.submod.parameters()]
+        self._polar_hook_impl = None
         self._init_step_csv()
 
         print(f"Rank {dist.get_rank()}: Stage {self.stage_idx}, Model layers: {len(self.stage_model.model.layers)}")
@@ -889,16 +890,31 @@ class PolarParallel:
         # must be identical across POLAR DP replicas; leave buffers local.
         dist.barrier(group=dp_group)
 
-    def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
-        for p in module.parameters():
+    def _find_nonfinite_grad(self, module: torch.nn.Module):
+        for name, p in module.named_parameters():
             if p.grad is None:
                 continue
             grad = p.grad
             if hasattr(grad, "to_local"):
                 grad = grad.to_local()
-            if not torch.isfinite(grad).all():
-                return True
-        return False
+            finite = torch.isfinite(grad)
+            if not bool(finite.all().item()):
+                bad_count = int((~finite).sum().item())
+                max_abs = float(grad.detach().nan_to_num().abs().max().item())
+                return name, bad_count, max_abs
+        return None
+
+    def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
+        return self._find_nonfinite_grad(module) is not None
+
+    def _clear_polar_residual_state_(self) -> None:
+        for state_list in (self.errors, self.gradients, self.grads_pred):
+            for i in range(len(state_list)):
+                state_list[i] = None
+        if self._polar_hook_impl is not None and hasattr(
+            self._polar_hook_impl, "reset_state"
+        ):
+            self._polar_hook_impl.reset_state()
 
     @torch.no_grad()
     def _clip_grad_norm_local_(self, module: torch.nn.Module, max_norm: float) -> torch.Tensor:
@@ -1148,19 +1164,20 @@ class PolarParallel:
             elif polar_hook == "ef_lowmem":
                 from .hooks import PolarGpipeLowMemoryErrorFeedbackHook
 
+                self._polar_hook_impl = PolarGpipeLowMemoryErrorFeedbackHook(
+                    device_mesh=self.device_mesh,
+                    model=self.stage.submod,
+                    errors=self.errors,
+                    micro_batch_size=self.micro_batches,
+                    comm_timing=self.comm_timing,
+                    lowbit_group=lowbit_group,
+                    bucket_numel=int(getattr(self.args, "polar_bucket_numel", 4_000_000)),
+                    max_inflight_buckets=int(
+                        getattr(self.args, "polar_max_inflight_buckets", 1)
+                    ),
+                )
                 self.stage.submod.register_full_backward_hook(
-                    PolarGpipeLowMemoryErrorFeedbackHook(
-                        device_mesh=self.device_mesh,
-                        model=self.stage.submod,
-                        errors=self.errors,
-                        micro_batch_size=self.micro_batches,
-                        comm_timing=self.comm_timing,
-                        lowbit_group=lowbit_group,
-                        bucket_numel=int(getattr(self.args, "polar_bucket_numel", 4_000_000)),
-                        max_inflight_buckets=int(
-                            getattr(self.args, "polar_max_inflight_buckets", 1)
-                        ),
-                    )
+                    self._polar_hook_impl
                 )
             elif polar_hook == "scaling_only":
                 from .hooks import PolarGpipeScalingOnlyHook
@@ -1218,12 +1235,23 @@ class PolarParallel:
             )
 
         global_step = 0
+        max_steps = getattr(self.args, "max_steps", None)
         if self.stage.is_last:
-            pbar = tqdm(self.dataloader)
+            try:
+                data_total = len(self.dataloader)
+            except TypeError:
+                data_total = None
+            total = (
+                min(data_total, int(max_steps))
+                if max_steps is not None and data_total is not None
+                else int(max_steps)
+                if max_steps is not None
+                else data_total
+            )
+            pbar = tqdm(self.dataloader, total=total)
         else:
             pbar = self.dataloader
 
-        max_steps = getattr(self.args, "max_steps", None)
         grad_clip_norm = float(getattr(self.args, "grad_clip_norm", 1.0))
         run_t0 = time.perf_counter()
 
@@ -1280,11 +1308,20 @@ class PolarParallel:
                     # 1F1B backward has completed for this pipeline stage.
                     self._allreduce_dp_grads_()
 
-                if self._has_nonfinite_grads(self.stage.submod):
+                bad_grad = self._find_nonfinite_grad(self.stage.submod)
+                if bad_grad is not None:
+                    bad_name, bad_count, bad_max_abs = bad_grad
                     if self.optimizer:
                         self.optimizer.zero_grad(set_to_none=True)
+                    self._clear_polar_residual_state_()
                     if self.stage.is_last:
-                        print(f"[warn] non-finite gradients at step {global_step}; skip optimizer step")
+                        print(
+                            f"[warn] non-finite gradients at step {global_step}; "
+                            f"skip optimizer step; cleared POLAR residual state; "
+                            f"first_bad={bad_name} bad_count={bad_count} "
+                            f"max_abs={bad_max_abs:.6g}",
+                            flush=True,
+                        )
                     global_step += 1
                     prof.step()
                     continue
@@ -1557,10 +1594,19 @@ class PolarParallel:
                 if self.baseline_mode == "manual":
                     self._allreduce_dp_grads_()
 
-                if self._has_nonfinite_grads(stage_mod):
+                bad_grad = self._find_nonfinite_grad(stage_mod)
+                if bad_grad is not None:
+                    bad_name, bad_count, bad_max_abs = bad_grad
                     optimizer.zero_grad(set_to_none=True)
+                    self._clear_polar_residual_state_()
                     if baseline_stage.is_last:
-                        print(f"[warn] non-finite gradients at step {global_step}; skip optimizer step")
+                        print(
+                            f"[warn] non-finite gradients at step {global_step}; "
+                            f"skip optimizer step; cleared POLAR residual state; "
+                            f"first_bad={bad_name} bad_count={bad_count} "
+                            f"max_abs={bad_max_abs:.6g}",
+                            flush=True,
+                        )
                     global_step += 1
                     prof.step()
                     continue
