@@ -353,7 +353,7 @@ class PolarParallel:
         self.optimizer_name = optimizer
         if optimizer == "adamw":
             self.optimizer = torch.optim.AdamW(
-                self.stage.submod.parameters(), lr=self.lr
+                self.stage.submod.parameters(), lr=self.lr, foreach=False
             )
         elif optimizer == "sgd":
             self.optimizer = torch.optim.SGD(
@@ -1278,7 +1278,9 @@ class PolarParallel:
         if self.optimizer_name == "sgd":
             optimizer = torch.optim.SGD(stage_mod.parameters(), lr=self.lr)
         elif self.optimizer_name == "adamw":
-            optimizer = torch.optim.AdamW(stage_mod.parameters(), lr=self.lr)
+            optimizer = torch.optim.AdamW(
+                stage_mod.parameters(), lr=self.lr, foreach=False
+            )
         else:
             raise ValueError(f"Unknown optimizer: {self.optimizer_name}")
 
