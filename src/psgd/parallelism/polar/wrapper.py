@@ -697,11 +697,12 @@ class PolarParallel:
             if hasattr(tensor, "to_local"):
                 tensor = tensor.to_local()
             dist.broadcast(tensor, src=src_rank, group=dp_group)
-        for buffer in self.stage_model.buffers():
-            tensor = buffer.data
-            if hasattr(tensor, "to_local"):
-                tensor = tensor.to_local()
-            dist.broadcast(tensor, src=src_rank, group=dp_group)
+
+        # Buffers can diverge across TP-local module transforms (for example
+        # RoPE/cache buffers), which makes DP peers issue a different number of
+        # broadcasts on the same process group. Parameters are the state that
+        # must be identical across POLAR DP replicas; leave buffers local.
+        dist.barrier(group=dp_group)
 
     def _has_nonfinite_grads(self, module: torch.nn.Module) -> bool:
         for p in module.parameters():
