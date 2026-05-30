@@ -662,6 +662,15 @@ def main():
 
     args = parser.parse_args()
 
+    if args.method == "bitscom" and not args.using_polar:
+        raise ValueError("--method bitscom requires --using-polar true")
+    if args.using_polar and args.method != "bitscom":
+        print(
+            "[warn] POLAR is enabled without bitscom; DP communication will "
+            "use dense torch.distributed all-reduce.",
+            flush=True,
+        )
+
     if args.pp_size <= 0 or args.tp_size <= 0:
         raise ValueError("--pp-size and --tp-size must be positive")
     if args.micro_batches < args.pp_size:
@@ -727,6 +736,15 @@ def main():
     # Initialize distributed
     dist.init_process_group(backend="nccl", init_method="env://")
     world_size = dist.get_world_size()
+    if dist.get_rank() == 0:
+        print(
+            "[qwen14b-config] "
+            f"using_polar={args.using_polar} polar_hook={args.polar_hook} "
+            f"method={args.method} bitwidth={args.bitwidth} "
+            f"comm_timing={args.comm_timing} micro_batches={args.micro_batches} "
+            f"pp={args.pp_size} tp={args.tp_size} world_size={world_size}",
+            flush=True,
+        )
     
     pp_size = args.pp_size
     tp_size = args.tp_size

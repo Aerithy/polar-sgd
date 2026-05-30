@@ -1300,6 +1300,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.dtype = dtype
         self.buckets = self._build_buckets()
         self._logged_bucket_schema = False
+        self._logged_predict_trigger = False
         self.offloaded_pred_buckets: Optional[List[_OffloadedBucket]] = None
 
     @staticmethod
@@ -1486,6 +1487,18 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
     @torch.no_grad()
     def _bucketed_predict_to_cpu_(self) -> None:
         self._log_bucket_schema_once()
+        if not self._logged_predict_trigger:
+            logger.info(
+                "[polar-hook] ef_lowmem POLAR trigger: bucketed predicted "
+                "DP gradients via %s, comm_timing=%s, micro_batches=%s, "
+                "buckets=%s, bucket_numel=%s",
+                "bitscom" if self.lowbit_group is not None else "dense",
+                self.comm_timing,
+                self.micro_batch_size,
+                len(self.buckets),
+                self.bucket_numel,
+            )
+            self._logged_predict_trigger = True
         self.offloaded_pred_buckets = []
 
         for entries in self.buckets:

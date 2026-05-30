@@ -1081,6 +1081,23 @@ class PolarParallel:
             polar_hook = getattr(self.args, "polar_hook", "io")
             polar_beta = float(getattr(self.args, "polar_beta", 0.9))
             lowbit_group = getattr(self, "lowbit_group", None)
+            method = getattr(self.args, "method", "none")
+            if method == "bitscom" and lowbit_group is None:
+                raise RuntimeError(
+                    "POLAR was launched with --method bitscom, but "
+                    "PolarParallel.lowbit_group is None before hook registration."
+                )
+            logger.info(
+                "[PolarParallel:polar] enabled rank=%s stage=%s hook=%s "
+                "method=%s lowbit_group=%s comm_timing=%s micro_batches=%s",
+                dist.get_rank(),
+                self.stage_idx,
+                polar_hook,
+                method,
+                lowbit_group is not None,
+                self.comm_timing,
+                self.micro_batches,
+            )
 
             if polar_hook == "momentum":
                 from .hooks import PolarGpipeMomentumExtrapHook
@@ -1189,6 +1206,16 @@ class PolarParallel:
                         lowbit_group=lowbit_group,
                     )
                 )
+        else:
+            logger.info(
+                "[PolarParallel:baseline] enabled rank=%s stage=%s "
+                "using_polar=%s baseline_mode=%s dense_dp_sync=%s",
+                dist.get_rank(),
+                self.stage_idx,
+                using_polar,
+                self.baseline_mode,
+                self.dp_mesh.size() > 1,
+            )
 
         global_step = 0
         if self.stage.is_last:
