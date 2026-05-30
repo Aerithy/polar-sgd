@@ -1283,13 +1283,40 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.params: List[torch.nn.Parameter] = [
             p for p in self.model.parameters()
         ]
-        self.tensor_numels: List[int] = [int(p.numel()) for p in self.params]
-        dev = next(self.model.parameters()).device
-        dtype = next(self.model.parameters()).dtype
+        first_local_param = self._local_tensor(self.params[0].data)
+        self.tensor_numels: List[int] = [
+            int(self._local_tensor(p.data).numel()) for p in self.params
+        ]
+        dev = first_local_param.device
+        dtype = first_local_param.dtype
         self.device = dev
         self.dtype = dtype
         self.buckets = self._build_buckets()
         self._logged_bucket_schema = False
+
+    @staticmethod
+    def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        if hasattr(tensor, "to_local"):
+            return tensor.to_local()
+        return tensor
+
+    def _new_grad_like_param(self, param: torch.nn.Parameter) -> torch.Tensor:
+        data = param.data
+        if hasattr(data, "to_local"):
+            return torch.empty_like(data)
+        return torch.empty_like(param)
+
+    def _local_grad(self, param: torch.nn.Parameter) -> Optional[torch.Tensor]:
+        if param.grad is None:
+            return None
+        return self._local_tensor(param.grad)
+
+    def _ensure_local_grad_(self, param: torch.nn.Parameter, param_idx: int) -> torch.Tensor:
+        grad = self._local_grad(param)
+        if grad is None or int(grad.numel()) != self.tensor_numels[param_idx]:
+            param.grad = self._new_grad_like_param(param)
+            grad = self._local_tensor(param.grad)
+        return grad
 
     def _trigger_condition(self) -> bool:
         if self.comm_timing == -1:
@@ -1356,8 +1383,9 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             p = self.params[entry.param_idx]
             err = self.errors[entry.param_idx]
             dst = buffer[offset: offset + entry.length]
+            grad = self._local_grad(p)
 
-            if p.grad is None:
+            if grad is None:
                 if err is None:
                     dst.zero_()
                 else:
@@ -1365,7 +1393,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                     dst.copy_(err_flat[entry.start: entry.start + entry.length])
                     err_flat[entry.start: entry.start + entry.length].neg_()
             else:
-                grad_flat = p.grad.reshape(-1)
+                grad_flat = grad.reshape(-1)
                 dst.copy_(grad_flat[entry.start: entry.start + entry.length])
                 if err is not None:
                     err_flat = err.reshape(-1)
@@ -1383,10 +1411,8 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         offset = 0
         for entry in inflight.entries:
             p = self.params[entry.param_idx]
-            if p.grad is None or p.grad.numel() != self.tensor_numels[entry.param_idx]:
-                p.grad = torch.empty_like(p)
-
-            grad_flat = p.grad.reshape(-1)
+            grad = self._ensure_local_grad_(p, entry.param_idx)
+            grad_flat = grad.reshape(-1)
             grad_flat[entry.start: entry.start + entry.length].copy_(
                 inflight.buffer[offset: offset + entry.length]
             )
