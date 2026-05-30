@@ -125,7 +125,12 @@ def get_dataloader(
 # -----------------------------
 # Qwen Model Partitioning for Pipeline Parallelism
 # -----------------------------
-def partition_qwen_model(model, stage_idx: int, num_stages: int):
+def partition_qwen_model(
+    model,
+    stage_idx: int,
+    num_stages: int,
+    debug_nan_steps: int = 0,
+):
     """
     Partition Qwen model for pipeline parallelism.
     - Keep only layers assigned to this stage
@@ -221,6 +226,20 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
     
     # Custom forward method for partitioned model with proper RoPE handling
     def custom_forward(input_ids_or_hidden, attention_mask=None):
+        debug_forward = int(debug_nan_steps or 0) > 0
+        debug_count = int(getattr(model, "_polar_forward_debug_count", 0))
+        if debug_forward and debug_count < int(debug_nan_steps):
+            x = input_ids_or_hidden
+            x_float = x.detach().float() if torch.is_floating_point(x) else x.detach()
+            print(
+                f"[debug_forward][stage {stage_idx}] enter "
+                f"shape={tuple(x.shape)} dtype={x.dtype} "
+                f"finite={bool(torch.isfinite(x_float).all().item())} "
+                f"min={float(x_float.min().item()) if x.numel() else 0.0:.6g} "
+                f"max={float(x_float.max().item()) if x.numel() else 0.0:.6g}",
+                flush=True,
+            )
+
         if model.model.embed_tokens is not None:
             # Stage 0: input is token IDs
             hidden_states = model.model.embed_tokens(input_ids_or_hidden)
@@ -277,9 +296,22 @@ def partition_qwen_model(model, stage_idx: int, num_stages: int):
 
         # Apply lm_head if present
         if model.lm_head is not None:
-            return model.lm_head(hidden_states)
+            output = model.lm_head(hidden_states)
         else:
-            return hidden_states
+            output = hidden_states
+
+        if debug_forward and debug_count < int(debug_nan_steps):
+            out_float = output.detach().float()
+            print(
+                f"[debug_forward][stage {stage_idx}] exit "
+                f"shape={tuple(output.shape)} dtype={output.dtype} "
+                f"finite={bool(torch.isfinite(out_float).all().item())} "
+                f"min={float(out_float.min().item()) if output.numel() else 0.0:.6g} "
+                f"max={float(out_float.max().item()) if output.numel() else 0.0:.6g}",
+                flush=True,
+            )
+            model._polar_forward_debug_count = debug_count + 1
+        return output
 
     # Replace forward method
     model.forward = custom_forward
@@ -579,7 +611,12 @@ def main():
     print(f"Stage index: {stage_idx} / {pp_size}; TP rank: {tp_rank} / {tp_size}")
     
     # Partition model for pipeline parallelism
-    stage_model = partition_qwen_model(model, stage_idx, pp_size)
+    stage_model = partition_qwen_model(
+        model,
+        stage_idx,
+        pp_size,
+        debug_nan_steps=args.debug_nan_steps,
+    )
     
     dp_rank = dp_mesh.get_local_rank()
     print(f"DP rank: {dp_rank} / {dp_size}")

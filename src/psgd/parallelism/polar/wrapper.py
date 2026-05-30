@@ -381,6 +381,7 @@ class PolarParallel:
             f"[PolarParallel:init] optimizer={optimizer} lr={self.lr} "
             f"baseline_mode={self.baseline_mode} use_local_sgd={self.use_local_sgd}"
         )
+        self._debug_check_optimizer_parameters("after_optimizer_init")
         print(
             f"[PolarParallel] version={POLAR_WRAPPER_FIX_VERSION} "
             f"rank={dist.get_rank()} stage={self.stage_idx}",
@@ -543,9 +544,13 @@ class PolarParallel:
         nonfinite = 0
         max_abs = 0.0
         first_bad = None
+        param_count = 0
+        dtensor_count = 0
         for name, param in self.stage_model.named_parameters():
+            param_count += 1
             tensor = param
             if hasattr(tensor, "to_local"):
+                dtensor_count += 1
                 tensor = tensor.to_local()
             total += tensor.numel()
             finite = torch.isfinite(tensor).all()
@@ -562,8 +567,37 @@ class PolarParallel:
 
         print(
             f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
-            f"{where} params_total={total} nonfinite_params={nonfinite} "
+            f"{where} local_params_total={total} param_tensors={param_count} "
+            f"dtensor_params={dtensor_count} nonfinite_params={nonfinite} "
             f"max_abs={max_abs:.6g} first_bad={first_bad}",
+            flush=True,
+        )
+
+    def _debug_check_optimizer_parameters(self, where: str) -> None:
+        if not self._debug_enabled() or self.optimizer is None:
+            return
+
+        local_numel = 0
+        param_count = 0
+        dtensor_count = 0
+        requires_grad_count = 0
+        for group in self.optimizer.param_groups:
+            for param in group["params"]:
+                param_count += 1
+                if param.requires_grad:
+                    requires_grad_count += 1
+                tensor = param
+                if hasattr(tensor, "to_local"):
+                    dtensor_count += 1
+                    tensor = tensor.to_local()
+                local_numel += int(tensor.numel())
+
+        print(
+            f"[debug_nan][rank {dist.get_rank()}][stage {self.stage_idx}] "
+            f"{where} optimizer_params={param_count} "
+            f"optimizer_requires_grad={requires_grad_count} "
+            f"optimizer_dtensor_params={dtensor_count} "
+            f"optimizer_local_numel={local_numel}",
             flush=True,
         )
 
@@ -626,6 +660,7 @@ class PolarParallel:
             return
 
         try:
+            from torch.distributed.tensor import Replicate
             from torch.distributed.tensor.parallel import (
                 ColwiseParallel,
                 RowwiseParallel,
@@ -647,6 +682,12 @@ class PolarParallel:
             )
 
         tp_plan = {}
+        if getattr(self.stage_model.model, "embed_tokens", None) is not None:
+            tp_plan["model.embed_tokens"] = RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Replicate(),
+            )
+
         for layer_idx, layer in enumerate(self.stage_model.model.layers):
             if isinstance(layer, torch.nn.Identity):
                 continue
