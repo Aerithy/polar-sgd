@@ -115,6 +115,8 @@ def _all_reduce_flat_async(
 def _wait_and_average_flat(work, tensor: torch.Tensor, group) -> None:
     if work is not None:
         work.wait()
+    if getattr(work, "_polar_already_averaged", False):
+        return
     world_size = dist.get_world_size(group)
     if world_size > 1:
         tensor.div_(world_size)
@@ -1302,6 +1304,12 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self._logged_bucket_schema = False
         self._logged_predict_trigger = False
         self.offloaded_pred_buckets: Optional[List[_OffloadedBucket]] = None
+        self.pending_pred_buckets: Optional[List[_InflightBucket]] = None
+        self.comm_stream = (
+            torch.cuda.Stream(device=self.device)
+            if self.device.type == "cuda"
+            else None
+        )
 
     @staticmethod
     def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1452,6 +1460,28 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         return buffer
 
     @torch.no_grad()
+    def _all_reduce_bucket_async_(self, buffer: torch.Tensor):
+        if (
+            self.lowbit_group is not None
+            and self.comm_stream is not None
+            and hasattr(self.lowbit_group, "all_reduce_stream")
+        ):
+            work = self.lowbit_group.all_reduce_stream(
+                buffer,
+                stream=self.comm_stream,
+                op=dist.ReduceOp.SUM,
+                group=self.dp_group,
+                post_scale=1.0 / max(int(self.dp_mesh.size()), 1),
+            )
+            setattr(work, "_polar_already_averaged", True)
+            return work
+        return _all_reduce_flat_async(
+            buffer,
+            group=self.dp_group,
+            lowbit_group=self.lowbit_group,
+        )
+
+    @torch.no_grad()
     def _finish_bucket_(self, inflight: _InflightBucket) -> None:
         _wait_and_average_flat(inflight.work, inflight.buffer, self.dp_group)
 
@@ -1472,11 +1502,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
         for entries in self.buckets:
             buffer = self._pack_bucket_and_update_error_(entries)
-            work = _all_reduce_flat_async(
-                buffer,
-                group=self.dp_group,
-                lowbit_group=self.lowbit_group,
-            )
+            work = self._all_reduce_bucket_async_(buffer)
             inflight.append(_InflightBucket(work=work, buffer=buffer, entries=entries))
 
             if len(inflight) >= self.max_inflight_buckets:
@@ -1484,6 +1510,17 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
         while inflight:
             self._finish_bucket_(inflight.pop(0))
+
+    @torch.no_grad()
+    def _finish_pred_bucket_to_cpu_(self, inflight: _InflightBucket) -> None:
+        _wait_and_average_flat(inflight.work, inflight.buffer, self.dp_group)
+        assert self.offloaded_pred_buckets is not None
+        self.offloaded_pred_buckets.append(
+            _OffloadedBucket(
+                buffer=inflight.buffer.detach().to("cpu"),
+                entries=inflight.entries,
+            )
+        )
 
     @torch.no_grad()
     def _bucketed_predict_to_cpu_(self) -> None:
@@ -1501,27 +1538,44 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             )
             self._logged_predict_trigger = True
         self.offloaded_pred_buckets = []
+        self.pending_pred_buckets = []
 
-        for entries in self.buckets:
-            buffer = self._pack_pred_bucket_and_seed_error_(entries)
-            work = _all_reduce_flat_async(
-                buffer,
-                group=self.dp_group,
-                lowbit_group=self.lowbit_group,
+        for bucket_idx, entries in enumerate(self.buckets):
+            _polar_hook_debug(
+                "ef_lowmem predict bucket stream launch "
+                f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                f"inflight={len(self.pending_pred_buckets)}"
             )
-            _wait_and_average_flat(work, buffer, self.dp_group)
-            self.offloaded_pred_buckets.append(
-                _OffloadedBucket(
-                    buffer=buffer.detach().to("cpu"),
+            buffer = self._pack_pred_bucket_and_seed_error_(entries)
+            work = self._all_reduce_bucket_async_(buffer)
+            self.pending_pred_buckets.append(
+                _InflightBucket(
+                    work=work,
+                    buffer=buffer,
                     entries=entries,
                 )
             )
-            del buffer
+
+            if len(self.pending_pred_buckets) >= self.max_inflight_buckets:
+                _polar_hook_debug(
+                    "ef_lowmem predict bucket stream throttle wait "
+                    f"remaining_inflight={len(self.pending_pred_buckets)}"
+                )
+                self._finish_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
 
     @torch.no_grad()
     def _finish_offloaded_prediction_(self) -> None:
         if self.offloaded_pred_buckets is None:
             return
+
+        if self.pending_pred_buckets is not None:
+            while self.pending_pred_buckets:
+                _polar_hook_debug(
+                    "ef_lowmem predict bucket stream final wait "
+                    f"remaining_inflight={len(self.pending_pred_buckets)}"
+                )
+                self._finish_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
+            self.pending_pred_buckets = None
 
         for offloaded in self.offloaded_pred_buckets:
             device_buffer = offloaded.buffer.to(self.device)
@@ -1570,6 +1624,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
     def reset_state(self) -> None:
         self.offloaded_pred_buckets = None
+        self.pending_pred_buckets = None
         self.micro_batch_counter = 0
         self.comm_handle = None
 
