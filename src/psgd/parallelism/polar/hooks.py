@@ -1306,6 +1306,8 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
             lowbit_group=lowbit_group,
         )
         self.params = [p for p in self.model.parameters()]
+        self.tp_mesh = device_mesh["tp"]
+        self.tp_local_rank = self.device_mesh.get_local_rank("tp")
         first_local_param = self._local_tensor(self.params[0].data)
         self.tensor_numels = [
             int(self._local_tensor(p.data).numel()) for p in self.params
@@ -1330,22 +1332,59 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
             return tensor.to_local()
         return tensor
 
+    def _match_param_local_tensor(
+        self,
+        tensor: torch.Tensor,
+        param: torch.nn.Parameter,
+        param_idx: int,
+    ) -> torch.Tensor:
+        tensor = self._local_tensor(tensor)
+        local_param = self._local_tensor(param.data)
+        local_shape = tuple(local_param.shape)
+        if tuple(tensor.shape) == local_shape:
+            return tensor
+        if int(tensor.numel()) == self.tensor_numels[param_idx]:
+            return tensor.reshape(local_shape)
+
+        full_shape = tuple(tensor.shape)
+        if len(full_shape) == len(local_shape):
+            shard_dims = [
+                dim
+                for dim, (full, local) in enumerate(zip(full_shape, local_shape))
+                if full != local and local > 0 and full >= local
+            ]
+            if len(shard_dims) == 1:
+                shard_dim = shard_dims[0]
+                local_dim = local_shape[shard_dim]
+                start = int(self.tp_local_rank) * local_dim
+                if start + local_dim <= full_shape[shard_dim]:
+                    return tensor.narrow(shard_dim, start, local_dim).contiguous()
+        return tensor
+
     def _new_grad_like_param(self, param: torch.nn.Parameter) -> torch.Tensor:
         data = param.data
         if hasattr(data, "to_local"):
             return torch.empty_like(data)
         return torch.empty_like(param)
 
-    def _local_grad(self, param: torch.nn.Parameter) -> Optional[torch.Tensor]:
+    def _local_grad(
+        self,
+        param: torch.nn.Parameter,
+        param_idx: int,
+    ) -> Optional[torch.Tensor]:
         if param.grad is None:
             return None
-        return self._local_tensor(param.grad)
+        return self._match_param_local_tensor(
+            param.grad,
+            param,
+            param_idx,
+        )
 
     def _ensure_local_grad_(self, param: torch.nn.Parameter, param_idx: int) -> torch.Tensor:
-        grad = self._local_grad(param)
+        grad = self._local_grad(param, param_idx)
         if grad is None or int(grad.numel()) != self.tensor_numels[param_idx]:
             param.grad = self._new_grad_like_param(param)
-            grad = self._local_tensor(param.grad)
+            grad = self._match_param_local_tensor(param.grad, param, param_idx)
         return grad
 
     @torch.no_grad()
@@ -1366,7 +1405,7 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
                 e = torch.zeros_like(g)
                 self.errors[i] = e
             else:
-                e = self._local_tensor(e)
+                e = self._match_param_local_tensor(e, p, i)
                 self.errors[i] = e
 
             pred = g + e
@@ -1443,7 +1482,7 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
 
     def __call__(self, *args, **kwds):
         for i, p in enumerate(self.params):
-            grad = self._local_grad(p)
+            grad = self._local_grad(p, i)
             if grad is None:
                 continue
             if self.grads[i] is None:
