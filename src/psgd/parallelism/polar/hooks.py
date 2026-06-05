@@ -1305,6 +1305,17 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
             comm_timing=comm_timing,
             lowbit_group=lowbit_group,
         )
+        self.params = [p for p in self.model.parameters()]
+        first_local_param = self._local_tensor(self.params[0].data)
+        self.tensor_numels = [
+            int(self._local_tensor(p.data).numel()) for p in self.params
+        ]
+        total_numel = int(sum(self.tensor_numels))
+        self.flat_pred = torch.empty(
+            total_numel,
+            device=first_local_param.device,
+            dtype=first_local_param.dtype,
+        )
         self.device = self.flat_pred.device
         self.comm_stream = (
             torch.cuda.Stream(device=self.device)
@@ -1312,6 +1323,69 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
             else None
         )
         self._logged_async_launch = False
+
+    @staticmethod
+    def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        if hasattr(tensor, "to_local"):
+            return tensor.to_local()
+        return tensor
+
+    def _new_grad_like_param(self, param: torch.nn.Parameter) -> torch.Tensor:
+        data = param.data
+        if hasattr(data, "to_local"):
+            return torch.empty_like(data)
+        return torch.empty_like(param)
+
+    def _local_grad(self, param: torch.nn.Parameter) -> Optional[torch.Tensor]:
+        if param.grad is None:
+            return None
+        return self._local_tensor(param.grad)
+
+    def _ensure_local_grad_(self, param: torch.nn.Parameter, param_idx: int) -> torch.Tensor:
+        grad = self._local_grad(param)
+        if grad is None or int(grad.numel()) != self.tensor_numels[param_idx]:
+            param.grad = self._new_grad_like_param(param)
+            grad = self._local_tensor(param.grad)
+        return grad
+
+    @torch.no_grad()
+    def _pack_predicted_(self):
+        offset = 0
+        for i, (p, g, e) in enumerate(
+            zip(self.params, self.grads, self.errors)
+        ):
+            n = self.tensor_numels[i]
+            dst = self.flat_pred[offset: offset + n]
+            if g is None:
+                self.grads_pred[i] = None
+                dst.zero_()
+                offset += n
+                continue
+
+            if e is None:
+                e = torch.zeros_like(g)
+                self.errors[i] = e
+            else:
+                e = self._local_tensor(e)
+                self.errors[i] = e
+
+            pred = g + e
+            self.grads_pred[i] = pred
+            dst.copy_(pred.reshape(-1))
+            offset += n
+
+    @torch.no_grad()
+    def _unpack_predicted_(self):
+        offset = 0
+        for i, p in enumerate(self.params):
+            n = self.tensor_numels[i]
+            if self.grads_pred[i] is None:
+                p.grad = None
+                offset += n
+                continue
+            grad = self._ensure_local_grad_(p, i)
+            grad.reshape(-1).copy_(self.flat_pred[offset: offset + n])
+            offset += n
 
     def _launch_all_reduce_async_(
         self,
@@ -1369,11 +1443,12 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
 
     def __call__(self, *args, **kwds):
         for i, p in enumerate(self.params):
-            if p.grad is None:
+            grad = self._local_grad(p)
+            if grad is None:
                 continue
             if self.grads[i] is None:
-                self.grads[i] = torch.zeros_like(p.grad)
-            self.grads[i].add_(p.grad)
+                self.grads[i] = torch.zeros_like(grad)
+            self.grads[i].add_(grad)
 
         if self._trigger_condition() and self.comm_handle is None:
             if not self._logged_async_launch:
@@ -1419,7 +1494,7 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
                 if g is None or p_pred is None:
                     new_errors.append(None)
                 else:
-                    new_errors.append(g - p_pred)
+                    new_errors.append(self._local_tensor(g) - self._local_tensor(p_pred))
             self.errors = new_errors
 
             self._unpack_predicted_()
