@@ -522,20 +522,36 @@ class PolarParallel:
         return int(getattr(self.args, "debug_nan_steps", 0) or 0) > 0
 
     def _profiler_context(self, trace_dir: str):
-        if bool(getattr(self.args, "disable_profiler", False)):
+        if self._as_bool(getattr(self.args, "disable_profiler", False)):
             return contextlib.nullcontext(_NoopProfiler())
+
+        wait_steps = int(getattr(self.args, "profiler_wait_steps", 1))
+        warmup_steps = int(getattr(self.args, "profiler_warmup_steps", 1))
+        active_steps = int(getattr(self.args, "profiler_active_steps", 1))
+        repeat = int(getattr(self.args, "profiler_repeat", 1))
+        profile_memory = self._as_bool(getattr(self.args, "profiler_memory", False))
+        record_shapes = self._as_bool(getattr(self.args, "profiler_shapes", False))
+        with_stack = self._as_bool(getattr(self.args, "profiler_stack", False))
+        with_flops = self._as_bool(getattr(self.args, "profiler_flops", False))
+        acc_events = self._as_bool(getattr(self.args, "profiler_acc_events", False))
 
         return torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
-            profile_memory=True,
-            record_shapes=True,
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            profile_memory=profile_memory,
+            record_shapes=record_shapes,
+            schedule=torch.profiler.schedule(
+                wait=wait_steps,
+                warmup=warmup_steps,
+                active=active_steps,
+                repeat=repeat,
+            ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_dir),
-            with_stack=True,
-            acc_events=True,
+            with_stack=with_stack,
+            with_flops=with_flops,
+            acc_events=acc_events,
         )
 
     def _debug_check_stage_parameters(self, where: str) -> None:

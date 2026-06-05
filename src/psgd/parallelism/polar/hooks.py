@@ -140,6 +140,7 @@ class _InflightBucket:
 class _OffloadedBucket:
     buffer: torch.Tensor
     entries: List[_BucketEntry]
+    ready_event: Optional[torch.cuda.Event] = None
 
 
 class GpipeHook:
@@ -1310,6 +1311,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             if self.device.type == "cuda"
             else None
         )
+        self.copy_stream = (
+            torch.cuda.Stream(device=self.device)
+            if self.device.type == "cuda"
+            else None
+        )
 
     @staticmethod
     def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1523,6 +1529,46 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         )
 
     @torch.no_grad()
+    def _enqueue_pred_bucket_to_cpu_(self, inflight: _InflightBucket) -> None:
+        if self.copy_stream is None or not inflight.buffer.is_cuda:
+            self._finish_pred_bucket_to_cpu_(inflight)
+            return
+
+        assert self.offloaded_pred_buckets is not None
+        try:
+            cpu_buffer = torch.empty(
+                tuple(inflight.buffer.shape),
+                dtype=inflight.buffer.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+        except RuntimeError:
+            logger.warning(
+                "[polar-hook] pinned CPU bucket allocation failed; "
+                "falling back to synchronous prediction offload."
+            )
+            self._finish_pred_bucket_to_cpu_(inflight)
+            return
+        ready = torch.cuda.Event()
+        with torch.cuda.stream(self.copy_stream):
+            if inflight.work is not None:
+                if hasattr(inflight.work, "block_current_stream"):
+                    inflight.work.block_current_stream()
+                else:
+                    inflight.work.wait()
+            cpu_buffer.copy_(inflight.buffer.detach(), non_blocking=True)
+            ready.record(self.copy_stream)
+
+        inflight.buffer.record_stream(self.copy_stream)
+        self.offloaded_pred_buckets.append(
+            _OffloadedBucket(
+                buffer=cpu_buffer,
+                entries=inflight.entries,
+                ready_event=ready,
+            )
+        )
+
+    @torch.no_grad()
     def _bucketed_predict_to_cpu_(self) -> None:
         self._log_bucket_schema_once()
         if not self._logged_predict_trigger:
@@ -1558,10 +1604,10 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
             if len(self.pending_pred_buckets) >= self.max_inflight_buckets:
                 _polar_hook_debug(
-                    "ef_lowmem predict bucket stream throttle wait "
+                    "ef_lowmem predict bucket stream async offload "
                     f"remaining_inflight={len(self.pending_pred_buckets)}"
                 )
-                self._finish_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
+                self._enqueue_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
 
     @torch.no_grad()
     def _finish_offloaded_prediction_(self) -> None:
@@ -1578,7 +1624,9 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             self.pending_pred_buckets = None
 
         for offloaded in self.offloaded_pred_buckets:
-            device_buffer = offloaded.buffer.to(self.device)
+            if offloaded.ready_event is not None:
+                offloaded.ready_event.synchronize()
+            device_buffer = offloaded.buffer.to(self.device, non_blocking=True)
             offset = 0
             for entry in offloaded.entries:
                 p = self.params[entry.param_idx]
