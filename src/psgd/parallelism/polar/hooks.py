@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 
@@ -141,6 +142,33 @@ class _OffloadedBucket:
     buffer: torch.Tensor
     entries: List[_BucketEntry]
     ready_event: Optional[torch.cuda.Event] = None
+
+
+class _AsyncLaunchWork:
+    """Host-side launch future plus the device-side distributed work."""
+
+    def __init__(self, thread: threading.Thread):
+        self.thread = thread
+        self.work = None
+        self.error: Optional[BaseException] = None
+
+    def wait(self):
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+        if self.work is not None:
+            self.work.wait()
+        return True
+
+    def block_current_stream(self):
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+        if self.work is not None:
+            if hasattr(self.work, "block_current_stream"):
+                return self.work.block_current_stream()
+            self.work.wait()
+        return True
 
 
 class GpipeHook:
@@ -1246,6 +1274,169 @@ class PolarGpipeErrorFeedbackOnlyHook:
                 self.grads[i] = None
             self.micro_batch_counter = 0
             self.comm_handle = None
+
+
+class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
+    """Full-flat error feedback with host-side async communication launch.
+
+    This hook is intentionally memory-heavier than `ef_lowmem`: it keeps one
+    full-stage flat prediction buffer. The point is to validate whether moving
+    bitscom launch out of the autograd hook's critical path restores overlap.
+    """
+
+    def __init__(
+        self,
+        device_mesh: dist.device_mesh.DeviceMesh,
+        model: torch.nn.Module,
+        grads: List[Optional[torch.Tensor]],
+        grads_pred: List[Optional[torch.Tensor]],
+        errors: List[Optional[torch.Tensor]],
+        micro_batch_size: int,
+        comm_timing: int,
+        lowbit_group=None,
+    ):
+        super().__init__(
+            device_mesh=device_mesh,
+            model=model,
+            grads=grads,
+            grads_pred=grads_pred,
+            errors=errors,
+            micro_batch_size=micro_batch_size,
+            comm_timing=comm_timing,
+            lowbit_group=lowbit_group,
+        )
+        self.device = self.flat_pred.device
+        self.comm_stream = (
+            torch.cuda.Stream(device=self.device)
+            if self.device.type == "cuda"
+            else None
+        )
+        self._logged_async_launch = False
+
+    def _launch_all_reduce_async_(
+        self,
+        ready_event: Optional[torch.cuda.Event],
+    ):
+        holder: List[Optional[_AsyncLaunchWork]] = [None]
+
+        def _runner() -> None:
+            try:
+                if self.device.type == "cuda":
+                    torch.cuda.set_device(self.device)
+                    if ready_event is not None:
+                        if self.comm_stream is not None:
+                            self.comm_stream.wait_event(ready_event)
+                        else:
+                            torch.cuda.current_stream(self.device).wait_event(
+                                ready_event
+                            )
+                if (
+                    self.lowbit_group is not None
+                    and self.comm_stream is not None
+                    and hasattr(self.lowbit_group, "all_reduce_stream")
+                ):
+                    work = self.lowbit_group.all_reduce_stream(
+                        self.flat_pred,
+                        stream=self.comm_stream,
+                        op=dist.ReduceOp.SUM,
+                        group=self.dp_group,
+                        post_scale=1.0 / max(int(self.dp_mesh.size()), 1),
+                    )
+                    setattr(work, "_polar_already_averaged", True)
+                else:
+                    work = _all_reduce_flat_async(
+                        self.flat_pred,
+                        group=self.dp_group,
+                        lowbit_group=self.lowbit_group,
+                    )
+                assert holder[0] is not None
+                holder[0].work = work
+                if getattr(work, "_polar_already_averaged", False):
+                    setattr(holder[0], "_polar_already_averaged", True)
+            except BaseException as exc:
+                assert holder[0] is not None
+                holder[0].error = exc
+
+        thread = threading.Thread(
+            target=_runner,
+            name="polar-full-async-launch",
+            daemon=True,
+        )
+        launch_work = _AsyncLaunchWork(thread)
+        holder[0] = launch_work
+        thread.start()
+        return launch_work
+
+    def __call__(self, *args, **kwds):
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
+            if self.grads[i] is None:
+                self.grads[i] = torch.zeros_like(p.grad)
+            self.grads[i].add_(p.grad)
+
+        if self._trigger_condition() and self.comm_handle is None:
+            if not self._logged_async_launch:
+                logger.info(
+                    "[polar-hook] ef_full_async_launch: full-flat predicted "
+                    "DP gradients via %s, comm_timing=%s, micro_batches=%s, "
+                    "numel=%s",
+                    "bitscom" if self.lowbit_group is not None else "dense",
+                    self.comm_timing,
+                    self.micro_batch_size,
+                    int(self.flat_pred.numel()),
+                )
+                self._logged_async_launch = True
+            _trace_evidence(
+                "POLAR",
+                "ef_full_async_launch",
+                "meaning='POLAR snapshots one full predicted DP-gradient "
+                "buffer in the backward hook, then launches bitscom from a "
+                "background host thread so the hook can return before the "
+                "full lowbit communication chain is submitted' "
+                f"numel={int(self.flat_pred.numel())} "
+                f"dtype={self.flat_pred.dtype} device={self.flat_pred.device}",
+            )
+            self._pack_predicted_()
+            ready_event = None
+            if self.device.type == "cuda":
+                ready_event = torch.cuda.Event()
+                ready_event.record(torch.cuda.current_stream(self.device))
+            self.comm_handle = self._launch_all_reduce_async_(ready_event)
+
+        self.micro_batch_counter += 1
+
+        if self.micro_batch_counter == self.micro_batch_size:
+            if self.comm_handle is not None:
+                _wait_and_average_flat(
+                    self.comm_handle,
+                    self.flat_pred,
+                    self.dp_group,
+                )
+
+            new_errors: List[Optional[torch.Tensor]] = []
+            for g, p_pred in zip(self.grads, self.grads_pred):
+                if g is None or p_pred is None:
+                    new_errors.append(None)
+                else:
+                    new_errors.append(g - p_pred)
+            self.errors = new_errors
+
+            self._unpack_predicted_()
+
+            for i in range(len(self.grads)):
+                self.grads[i] = None
+            self.micro_batch_counter = 0
+            self.comm_handle = None
+
+    def reset_state(self) -> None:
+        if self.comm_handle is not None:
+            self.comm_handle.wait()
+        for i in range(len(self.grads)):
+            self.grads[i] = None
+            self.grads_pred[i] = None
+        self.micro_batch_counter = 0
+        self.comm_handle = None
 
 
 class PolarGpipeLowMemoryErrorFeedbackHook:

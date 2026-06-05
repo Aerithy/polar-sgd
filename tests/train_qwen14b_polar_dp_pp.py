@@ -591,7 +591,16 @@ def main():
         "--polar-hook",
         type=str,
         default="momentum",
-        choices=["io", "momentum", "gpipe", "ef_only", "ef_lowmem", "scaling_only", "none"],
+        choices=[
+            "io",
+            "momentum",
+            "gpipe",
+            "ef_only",
+            "ef_lowmem",
+            "ef_full_async_launch",
+            "scaling_only",
+            "none",
+        ],
         help=(
             "Which POLAR gradient prediction hook to use: "
             "'momentum' (no scaling, EMA momentum extrapolation), "
@@ -599,6 +608,8 @@ def main():
             "'gpipe' (legacy scaling hook), "
             "'ef_only' (error feedback only), "
             "'ef_lowmem' (error feedback only without grads_pred buffers), "
+            "'ef_full_async_launch' (full-flat error feedback with background "
+            "communication launch), "
             "'scaling_only' (scaling only), "
             "or 'none' (no scaling, no error feedback)."
         ),

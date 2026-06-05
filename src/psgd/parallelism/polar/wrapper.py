@@ -472,6 +472,7 @@ class PolarParallel:
             "gpipe": "legacy_scaling",
             "ef_only": "no_gradient_scaling",
             "ef_lowmem": "error_feedback_low_memory",
+            "ef_full_async_launch": "error_feedback_full_async_launch",
             "scaling_only": "no_error_feedback",
             "none": "no_error_feedback_no_gradient_scaling",
         }
@@ -1191,6 +1192,22 @@ class PolarParallel:
                     max_inflight_buckets=int(
                         getattr(self.args, "polar_max_inflight_buckets", 1)
                     ),
+                )
+                self.stage.submod.register_full_backward_hook(
+                    self._polar_hook_impl
+                )
+            elif polar_hook == "ef_full_async_launch":
+                from .hooks import PolarGpipeFullAsyncLaunchHook
+
+                self._polar_hook_impl = PolarGpipeFullAsyncLaunchHook(
+                    device_mesh=self.device_mesh,
+                    model=self.stage.submod,
+                    grads=self.gradients,
+                    grads_pred=self.grads_pred,
+                    errors=self.errors,
+                    micro_batch_size=self.micro_batches,
+                    comm_timing=self.comm_timing,
+                    lowbit_group=lowbit_group,
                 )
                 self.stage.submod.register_full_backward_hook(
                     self._polar_hook_impl
