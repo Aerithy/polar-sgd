@@ -1823,7 +1823,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                             and self.comm_stream is not None
                         ):
                             self.comm_stream.wait_event(task.ready_event)
-                        work = self._all_reduce_bucket_async_(task.buffer)
+                        if self.comm_stream is not None:
+                            with torch.cuda.stream(self.comm_stream):
+                                work = self._all_reduce_bucket_async_(task.buffer)
+                        else:
+                            work = self._all_reduce_bucket_async_(task.buffer)
                         self._enqueue_pred_bucket_to_cpu_(
                             _InflightBucket(
                                 work=work,
@@ -1867,7 +1871,27 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         if launch_queue is not None:
             launch_queue.put(None)
         if self.launch_thread is not None:
-            self.launch_thread.join()
+            self.launch_thread.join(timeout=120.0)
+            if self.launch_thread.is_alive():
+                try:
+                    rank = dist.get_rank()
+                except Exception:
+                    rank = -1
+                qsize = -1
+                if launch_queue is not None:
+                    try:
+                        qsize = launch_queue.qsize()
+                    except Exception:
+                        qsize = -1
+                logger.warning(
+                    "[polar-hook] ef_lowmem bucket launch worker still "
+                    "running after 120s; rank=%s queue_size=%s "
+                    "launch_error=%r",
+                    rank,
+                    qsize,
+                    self.launch_error,
+                )
+                self.launch_thread.join()
             self.launch_thread = None
         self.launch_queue = None
         if self.launch_error is not None:
