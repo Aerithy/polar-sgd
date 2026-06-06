@@ -1619,6 +1619,10 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self._logged_predict_trigger = False
         self.offloaded_pred_buckets: Optional[List[_OffloadedBucket]] = None
         self.pending_pred_buckets: Optional[List[_InflightBucket]] = None
+        self.host_async_launch = os.environ.get(
+            "POLAR_EF_LOWMEM_HOST_ASYNC",
+            "1",
+        ).lower() in {"1", "true", "yes", "on"}
         self.launch_queue: Optional[queue.Queue] = None
         self.launch_thread: Optional[threading.Thread] = None
         self.launch_error: Optional[BaseException] = None
@@ -1828,9 +1832,15 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                                 work = self._all_reduce_bucket_async_(task.buffer)
                         else:
                             work = self._all_reduce_bucket_async_(task.buffer)
+                        if work is not None:
+                            _wait_and_average_flat(
+                                work,
+                                task.buffer,
+                                self.dp_group,
+                            )
                         self._enqueue_pred_bucket_to_cpu_(
                             _InflightBucket(
-                                work=work,
+                                work=None,
                                 buffer=task.buffer,
                                 entries=task.entries,
                             )
@@ -1987,26 +1997,47 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             logger.info(
                 "[polar-hook] ef_lowmem POLAR trigger: bucketed predicted "
                 "DP gradients via %s, comm_timing=%s, micro_batches=%s, "
-                "buckets=%s, bucket_numel=%s",
+                "buckets=%s, bucket_numel=%s, host_async_launch=%s",
                 "bitscom" if self.lowbit_group is not None else "dense",
                 self.comm_timing,
                 self.micro_batch_size,
                 len(self.buckets),
                 self.bucket_numel,
+                self.host_async_launch,
             )
             self._logged_predict_trigger = True
         self.offloaded_pred_buckets = []
         self.pending_pred_buckets = []
-        self._start_bucket_launch_worker_()
+        if self.host_async_launch:
+            self._start_bucket_launch_worker_()
 
         for bucket_idx, entries in enumerate(self.buckets):
             _polar_hook_debug(
-                "ef_lowmem predict bucket snapshot enqueue "
+                "ef_lowmem predict bucket "
+                f"{'snapshot enqueue' if self.host_async_launch else 'stream launch'} "
                 f"idx={bucket_idx + 1}/{len(self.buckets)} "
-                f"queued={bucket_idx}"
+                f"inflight={len(self.pending_pred_buckets)}"
             )
             buffer = self._pack_pred_bucket_and_seed_error_(entries)
-            self._enqueue_bucket_launch_task_(buffer, entries)
+            if self.host_async_launch:
+                self._enqueue_bucket_launch_task_(buffer, entries)
+                continue
+
+            work = self._all_reduce_bucket_async_(buffer)
+            self.pending_pred_buckets.append(
+                _InflightBucket(
+                    work=work,
+                    buffer=buffer,
+                    entries=entries,
+                )
+            )
+
+            if len(self.pending_pred_buckets) >= self.max_inflight_buckets:
+                _polar_hook_debug(
+                    "ef_lowmem predict bucket stream async offload "
+                    f"remaining_inflight={len(self.pending_pred_buckets)}"
+                )
+                self._enqueue_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
 
     @torch.no_grad()
     def _finish_offloaded_prediction_(self) -> None:
