@@ -1483,6 +1483,7 @@ class PolarGpipeFullAsyncLaunchHook(PolarGpipeErrorFeedbackOnlyHook):
                     self.lowbit_group is not None
                     and self.comm_stream is not None
                     and hasattr(self.lowbit_group, "all_reduce_stream")
+                    and not getattr(self.lowbit_group, "backend_allreduce", False)
                 ):
                     work = self.lowbit_group.all_reduce_stream(
                         self.flat_pred,
@@ -1817,6 +1818,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             self.lowbit_group is not None
             and self.comm_stream is not None
             and hasattr(self.lowbit_group, "all_reduce_stream")
+            and not getattr(self.lowbit_group, "backend_allreduce", False)
         ):
             work = self.lowbit_group.all_reduce_stream(
                 buffer,
