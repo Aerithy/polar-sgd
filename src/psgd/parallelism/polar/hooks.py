@@ -36,6 +36,28 @@ def _polar_hook_debug(message: str) -> None:
     )
 
 
+def _polar_hook_timing_enabled() -> bool:
+    return os.environ.get("POLAR_HOOK_TIMING", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _polar_hook_timing(message: str) -> None:
+    if not _polar_hook_timing_enabled():
+        return
+    try:
+        rank = dist.get_rank()
+    except Exception:
+        rank = -1
+    print(
+        f"[polar-hook-timing rank={rank} t={time.time():.6f}] {message}",
+        flush=True,
+    )
+
+
 def _trace_explain_enabled() -> bool:
     return os.environ.get("TRACE_EXPLAIN", "0").lower() in {
         "1",
@@ -1840,8 +1862,18 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
     @torch.no_grad()
     def _enqueue_pred_bucket_to_cpu_(self, inflight: _InflightBucket) -> None:
+        t0 = time.perf_counter()
+        _polar_hook_timing(
+            "ef_lowmem offload enter "
+            f"buffer_numel={int(inflight.buffer.numel())} "
+            f"has_work={inflight.work is not None}"
+        )
         if self.copy_stream is None or not inflight.buffer.is_cuda:
             self._finish_pred_bucket_to_cpu_(inflight)
+            _polar_hook_timing(
+                "ef_lowmem offload sync-finish exit "
+                f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
+            )
             return
 
         assert self.offloaded_pred_buckets is not None
@@ -1858,14 +1890,24 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 "falling back to synchronous prediction offload."
             )
             self._finish_pred_bucket_to_cpu_(inflight)
+            _polar_hook_timing(
+                "ef_lowmem offload pinned-allocation-fallback exit "
+                f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
+            )
             return
+        t_alloc = time.perf_counter()
         ready = torch.cuda.Event()
         with torch.cuda.stream(self.copy_stream):
             if inflight.work is not None:
+                t_block = time.perf_counter()
                 if hasattr(inflight.work, "block_current_stream"):
                     inflight.work.block_current_stream()
                 else:
                     inflight.work.wait()
+                _polar_hook_timing(
+                    "ef_lowmem offload work-block returned "
+                    f"elapsed_ms={(time.perf_counter() - t_block) * 1000.0:.3f}"
+                )
             cpu_buffer.copy_(inflight.buffer.detach(), non_blocking=True)
             ready.record(self.copy_stream)
 
@@ -1876,6 +1918,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 entries=inflight.entries,
                 ready_event=ready,
             )
+        )
+        _polar_hook_timing(
+            "ef_lowmem offload exit "
+            f"alloc_ms={(t_alloc - t0) * 1000.0:.3f} "
+            f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
         )
 
     @torch.no_grad()
@@ -1900,14 +1947,52 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 f"inflight={len(self.pending_pred_buckets)} "
                 f"budget={budget}"
             )
+            bucket_t0 = time.perf_counter()
+            _polar_hook_timing(
+                "ef_lowmem bucket launch enter "
+                f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                f"inflight={len(self.pending_pred_buckets)} budget={budget}"
+            )
             if self.comm_stream is not None:
+                t_wait_stream = time.perf_counter()
                 self.comm_stream.wait_stream(torch.cuda.current_stream(self.device))
+                _polar_hook_timing(
+                    "ef_lowmem bucket wait_stream returned "
+                    f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                    f"elapsed_ms={(time.perf_counter() - t_wait_stream) * 1000.0:.3f}"
+                )
                 with torch.cuda.stream(self.comm_stream):
+                    t_pack = time.perf_counter()
                     buffer = self._pack_pred_bucket_and_seed_error_(entries)
+                    _polar_hook_timing(
+                        "ef_lowmem bucket pack returned "
+                        f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                        f"numel={int(buffer.numel())} "
+                        f"elapsed_ms={(time.perf_counter() - t_pack) * 1000.0:.3f}"
+                    )
+                    t_ar = time.perf_counter()
                     work = self._all_reduce_bucket_async_(buffer)
+                    _polar_hook_timing(
+                        "ef_lowmem bucket all_reduce_stream returned "
+                        f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                        f"elapsed_ms={(time.perf_counter() - t_ar) * 1000.0:.3f}"
+                    )
             else:
+                t_pack = time.perf_counter()
                 buffer = self._pack_pred_bucket_and_seed_error_(entries)
+                _polar_hook_timing(
+                    "ef_lowmem bucket pack returned "
+                    f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                    f"numel={int(buffer.numel())} "
+                    f"elapsed_ms={(time.perf_counter() - t_pack) * 1000.0:.3f}"
+                )
+                t_ar = time.perf_counter()
                 work = self._all_reduce_bucket_async_(buffer)
+                _polar_hook_timing(
+                    "ef_lowmem bucket all_reduce returned "
+                    f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                    f"elapsed_ms={(time.perf_counter() - t_ar) * 1000.0:.3f}"
+                )
             self.pending_pred_buckets.append(
                 _InflightBucket(
                     work=work,
@@ -1917,6 +2002,12 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             )
             self.next_pred_bucket_idx += 1
             launches += 1
+            _polar_hook_timing(
+                "ef_lowmem bucket launch exit-before-offload-check "
+                f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                f"pending={len(self.pending_pred_buckets)} "
+                f"elapsed_ms={(time.perf_counter() - bucket_t0) * 1000.0:.3f}"
+            )
 
             if len(self.pending_pred_buckets) >= self.max_inflight_buckets:
                 _polar_hook_debug(
@@ -1925,6 +2016,13 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                     f"remaining_inflight={len(self.pending_pred_buckets)}"
                 )
                 self._enqueue_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
+            _polar_hook_timing(
+                "ef_lowmem bucket launch exit "
+                f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                f"pending={len(self.pending_pred_buckets)} "
+                f"offloaded={len(self.offloaded_pred_buckets or [])} "
+                f"elapsed_ms={(time.perf_counter() - bucket_t0) * 1000.0:.3f}"
+            )
 
     @torch.no_grad()
     def _bucketed_predict_to_cpu_(self) -> None:
@@ -1997,31 +2095,68 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.next_pred_bucket_idx = None
 
     def __call__(self, *args, **kwds):
-        if self._trigger_condition() and self.offloaded_pred_buckets is None:
-            _trace_evidence(
-                "POLAR",
-                "ef_lowmem_bucketed_predict",
-                "meaning='ef_lowmem sends bucketed predicted gradients at "
-                "the configured POLAR trigger, then spreads later bucket "
-                "launches over subsequent autograd hook calls and offloads "
-                "reduced buckets to CPU until the pipeline step finishes' "
-                f"bucket_numel={self.bucket_numel} "
-                f"max_inflight={self.max_inflight_buckets} "
-                f"launch_buckets_per_hook={self.launch_buckets_per_hook}",
+        call_t0 = time.perf_counter()
+        trigger = self._trigger_condition()
+        active_prediction = self.offloaded_pred_buckets is not None
+        _polar_hook_timing(
+            "ef_lowmem hook enter "
+            f"micro_batch_counter={self.micro_batch_counter} "
+            f"micro_batch_size={self.micro_batch_size} trigger={trigger} "
+            f"active_prediction={active_prediction} "
+            f"next_bucket={self.next_pred_bucket_idx}"
+        )
+        try:
+            if trigger and self.offloaded_pred_buckets is None:
+                _trace_evidence(
+                    "POLAR",
+                    "ef_lowmem_bucketed_predict",
+                    "meaning='ef_lowmem sends bucketed predicted gradients at "
+                    "the configured POLAR trigger, then spreads later bucket "
+                    "launches over subsequent autograd hook calls and offloads "
+                    "reduced buckets to CPU until the pipeline step finishes' "
+                    f"bucket_numel={self.bucket_numel} "
+                    f"max_inflight={self.max_inflight_buckets} "
+                    f"launch_buckets_per_hook={self.launch_buckets_per_hook}",
+                )
+                t_predict = time.perf_counter()
+                self._bucketed_predict_to_cpu_()
+                _polar_hook_timing(
+                    "ef_lowmem hook predict path returned "
+                    f"elapsed_ms={(time.perf_counter() - t_predict) * 1000.0:.3f}"
+                )
+            elif self.offloaded_pred_buckets is not None:
+                t_launch = time.perf_counter()
+                self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
+                _polar_hook_timing(
+                    "ef_lowmem hook progressive launch returned "
+                    f"elapsed_ms={(time.perf_counter() - t_launch) * 1000.0:.3f}"
+                )
+
+            self.micro_batch_counter += 1
+
+            if self.micro_batch_counter == self.micro_batch_size:
+                t_finish = time.perf_counter()
+                if self.offloaded_pred_buckets is None:
+                    _polar_hook_timing("ef_lowmem hook final dense/bucket allreduce enter")
+                    self._bucketed_all_reduce_()
+                else:
+                    _polar_hook_timing("ef_lowmem hook finish offloaded prediction enter")
+                    self._finish_offloaded_prediction_()
+                _polar_hook_timing(
+                    "ef_lowmem hook final path returned "
+                    f"elapsed_ms={(time.perf_counter() - t_finish) * 1000.0:.3f}"
+                )
+                self.micro_batch_counter = 0
+                self.comm_handle = None
+        finally:
+            _polar_hook_timing(
+                "ef_lowmem hook exit "
+                f"micro_batch_counter={self.micro_batch_counter} "
+                f"next_bucket={self.next_pred_bucket_idx} "
+                f"pending={len(self.pending_pred_buckets or [])} "
+                f"offloaded={len(self.offloaded_pred_buckets or [])} "
+                f"elapsed_ms={(time.perf_counter() - call_t0) * 1000.0:.3f}"
             )
-            self._bucketed_predict_to_cpu_()
-        elif self.offloaded_pred_buckets is not None:
-            self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
-
-        self.micro_batch_counter += 1
-
-        if self.micro_batch_counter == self.micro_batch_size:
-            if self.offloaded_pred_buckets is None:
-                self._bucketed_all_reduce_()
-            else:
-                self._finish_offloaded_prediction_()
-            self.micro_batch_counter = 0
-            self.comm_handle = None
 
     def reset_state(self) -> None:
         self.offloaded_pred_buckets = None
