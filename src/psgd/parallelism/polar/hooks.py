@@ -1988,9 +1988,13 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                     )
                     t_ar = time.perf_counter()
                     work = self._all_reduce_bucket_async_(buffer)
+                    label = (
+                        "ef_lowmem bucket backend all_reduce returned"
+                        if getattr(self.lowbit_group, "backend_allreduce", False)
+                        else "ef_lowmem bucket all_reduce_stream returned"
+                    )
                     _polar_hook_timing(
-                        "ef_lowmem bucket all_reduce_stream returned "
-                        f"idx={bucket_idx + 1}/{len(self.buckets)} "
+                        f"{label} idx={bucket_idx + 1}/{len(self.buckets)} "
                         f"elapsed_ms={(time.perf_counter() - t_ar) * 1000.0:.3f}"
                     )
             else:
