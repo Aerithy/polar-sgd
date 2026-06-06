@@ -1900,8 +1900,14 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 f"inflight={len(self.pending_pred_buckets)} "
                 f"budget={budget}"
             )
-            buffer = self._pack_pred_bucket_and_seed_error_(entries)
-            work = self._all_reduce_bucket_async_(buffer)
+            if self.comm_stream is not None:
+                self.comm_stream.wait_stream(torch.cuda.current_stream(self.device))
+                with torch.cuda.stream(self.comm_stream):
+                    buffer = self._pack_pred_bucket_and_seed_error_(entries)
+                    work = self._all_reduce_bucket_async_(buffer)
+            else:
+                buffer = self._pack_pred_bucket_and_seed_error_(entries)
+                work = self._all_reduce_bucket_async_(buffer)
             self.pending_pred_buckets.append(
                 _InflightBucket(
                     work=work,
