@@ -37,20 +37,26 @@ def _polar_hook_debug(message: str) -> None:
 
 
 def _polar_hook_timing_enabled() -> bool:
-    return os.environ.get("POLAR_HOOK_TIMING", "0").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return True
 
 
-def _polar_hook_timing_rank_enabled(rank: int) -> bool:
-    ranks = os.environ.get("POLAR_HOOK_TIMING_RANKS")
-    if not ranks:
-        return True
-    allowed = {item.strip() for item in ranks.split(",") if item.strip()}
-    return "all" in allowed or str(rank) in allowed
+def _polar_timing_log_dir() -> str:
+    directory = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        if (
+            os.path.isdir(os.path.join(directory, "polar-sgd"))
+            and os.path.isdir(os.path.join(directory, "bitscom"))
+        ):
+            root = directory
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            root = os.getcwd()
+            break
+        directory = parent
+    log_dir = os.path.join(root, "debug_logs", "timing")
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
 
 
 def _polar_hook_timing(message: str) -> None:
@@ -60,19 +66,10 @@ def _polar_hook_timing(message: str) -> None:
         rank = dist.get_rank()
     except Exception:
         rank = -1
-    if not _polar_hook_timing_rank_enabled(rank):
-        return
     line = f"[polar-hook-timing rank={rank} t={time.time():.6f}] {message}"
-    log_file = os.environ.get("POLAR_HOOK_TIMING_FILE")
-    if log_file:
-        log_file = log_file.format(rank=rank)
-        directory = os.path.dirname(log_file)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-        return
-    print(line, flush=True)
+    log_file = os.path.join(_polar_timing_log_dir(), f"polar_hook_rank{rank}.log")
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 
 def _trace_explain_enabled() -> bool:
@@ -2167,7 +2164,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 self.comm_handle = None
         finally:
             _polar_hook_timing(
-                "ef_lowmem hook exit "
+                "SUMMARY ef_lowmem hook exit "
                 f"micro_batch_counter={self.micro_batch_counter} "
                 f"next_bucket={self.next_pred_bucket_idx} "
                 f"pending={len(self.pending_pred_buckets or [])} "
