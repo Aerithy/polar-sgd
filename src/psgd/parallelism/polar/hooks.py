@@ -1835,6 +1835,20 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             lowbit_group=self.lowbit_group,
         )
 
+    def _progress_lowbit_backend_(self, block: bool = False) -> None:
+        if self.lowbit_group is None:
+            return
+        progress = getattr(self.lowbit_group, "progress_lowbit", None)
+        if progress is None:
+            return
+        t_progress = time.perf_counter()
+        progressed = progress(block=block)
+        _polar_hook_timing(
+            "ef_lowmem lowbit explicit progress returned "
+            f"block={block} progressed={progressed} "
+            f"elapsed_ms={(time.perf_counter() - t_progress) * 1000.0:.3f}"
+        )
+
     @torch.no_grad()
     def _finish_bucket_(self, inflight: _InflightBucket) -> None:
         _wait_and_average_flat(inflight.work, inflight.buffer, self.dp_group)
@@ -1997,6 +2011,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                         f"{label} idx={bucket_idx + 1}/{len(self.buckets)} "
                         f"elapsed_ms={(time.perf_counter() - t_ar) * 1000.0:.3f}"
                     )
+                    self._progress_lowbit_backend_(block=False)
             else:
                 t_pack = time.perf_counter()
                 buffer = self._pack_pred_bucket_and_seed_error_(entries)
@@ -2013,6 +2028,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                     f"idx={bucket_idx + 1}/{len(self.buckets)} "
                     f"elapsed_ms={(time.perf_counter() - t_ar) * 1000.0:.3f}"
                 )
+                self._progress_lowbit_backend_(block=False)
             self.pending_pred_buckets.append(
                 _InflightBucket(
                     work=work,
@@ -2126,6 +2142,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             f"next_bucket={self.next_pred_bucket_idx}"
         )
         try:
+            self._progress_lowbit_backend_(block=False)
             if trigger and self.offloaded_pred_buckets is None:
                 _trace_evidence(
                     "POLAR",
