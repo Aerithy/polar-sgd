@@ -1890,21 +1890,44 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             )
         )
 
+    def _work_is_completed_(self, work: object) -> bool:
+        if work is None:
+            return True
+        is_completed = getattr(work, "is_completed", None)
+        if is_completed is not None:
+            return bool(is_completed())
+        is_completed = getattr(work, "isCompleted", None)
+        if is_completed is not None:
+            return bool(is_completed())
+        return False
+
     @torch.no_grad()
-    def _enqueue_pred_bucket_to_cpu_(self, inflight: _InflightBucket) -> None:
+    def _enqueue_pred_bucket_to_cpu_(
+        self,
+        inflight: _InflightBucket,
+        *,
+        block: bool = True,
+    ) -> bool:
         t0 = time.perf_counter()
         _polar_hook_timing(
             "ef_lowmem offload enter "
             f"buffer_numel={int(inflight.buffer.numel())} "
-            f"has_work={inflight.work is not None}"
+            f"has_work={inflight.work is not None} block={block}"
         )
+        if not block and not self._work_is_completed_(inflight.work):
+            _polar_hook_timing(
+                "ef_lowmem offload deferred work-not-ready "
+                f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
+            )
+            return False
+
         if self.copy_stream is None or not inflight.buffer.is_cuda:
             self._finish_pred_bucket_to_cpu_(inflight)
             _polar_hook_timing(
                 "ef_lowmem offload sync-finish exit "
                 f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
             )
-            return
+            return True
 
         assert self.offloaded_pred_buckets is not None
         try:
@@ -1924,13 +1947,15 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 "ef_lowmem offload pinned-allocation-fallback exit "
                 f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
             )
-            return
+            return True
         t_alloc = time.perf_counter()
         ready = torch.cuda.Event()
         with torch.cuda.stream(self.copy_stream):
             if inflight.work is not None:
                 t_block = time.perf_counter()
-                if hasattr(inflight.work, "block_current_stream"):
+                if not block:
+                    pass
+                elif hasattr(inflight.work, "block_current_stream"):
                     inflight.work.block_current_stream()
                 else:
                     inflight.work.wait()
@@ -1954,6 +1979,26 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             f"alloc_ms={(t_alloc - t0) * 1000.0:.3f} "
             f"elapsed_ms={(time.perf_counter() - t0) * 1000.0:.3f}"
         )
+        return True
+
+    @torch.no_grad()
+    def _drain_ready_pred_buckets_(self) -> int:
+        if self.pending_pred_buckets is None:
+            return 0
+        drained = 0
+        remaining: List[_InflightBucket] = []
+        for inflight in self.pending_pred_buckets:
+            if self._enqueue_pred_bucket_to_cpu_(inflight, block=False):
+                drained += 1
+            else:
+                remaining.append(inflight)
+        self.pending_pred_buckets = remaining
+        if drained:
+            _polar_hook_timing(
+                "ef_lowmem ready bucket drain returned "
+                f"drained={drained} pending={len(self.pending_pred_buckets)}"
+            )
+        return drained
 
     @torch.no_grad()
     def _launch_next_pred_buckets_(self, budget: int) -> None:
@@ -2047,11 +2092,10 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
 
             if len(self.pending_pred_buckets) >= self.max_inflight_buckets:
                 _polar_hook_debug(
-                    "ef_lowmem predict bucket async offload after progressive "
-                    "launch "
+                    "ef_lowmem predict bucket ready-drain after progressive launch "
                     f"remaining_inflight={len(self.pending_pred_buckets)}"
                 )
-                self._enqueue_pred_bucket_to_cpu_(self.pending_pred_buckets.pop(0))
+                self._drain_ready_pred_buckets_()
             _polar_hook_timing(
                 "ef_lowmem bucket launch exit "
                 f"idx={bucket_idx + 1}/{len(self.buckets)} "
@@ -2143,6 +2187,7 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         )
         try:
             self._progress_lowbit_backend_(block=False)
+            self._drain_ready_pred_buckets_()
             if trigger and self.offloaded_pred_buckets is None:
                 _trace_evidence(
                     "POLAR",
