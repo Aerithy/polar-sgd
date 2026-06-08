@@ -1654,10 +1654,11 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             1,
             int(os.environ.get("POLAR_EF_LOWMEM_LAUNCH_BUCKETS_PER_HOOK", "1")),
         )
+        lowbit_backend_pg = getattr(self.lowbit_group, "pg", None)
         self.use_lowbit_scheduler = (
             self.lowbit_group is not None
             and getattr(self.lowbit_group, "backend_allreduce", False)
-            and hasattr(self.lowbit_group, "schedule_lowbit_allreduce")
+            and hasattr(lowbit_backend_pg, "schedule_lowbit_allreduce")
             and os.environ.get("POLAR_EF_LOWMEM_LOWBIT_SCHEDULER", "1").lower()
             not in {"0", "false", "no", "off"}
         )
