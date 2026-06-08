@@ -171,6 +171,7 @@ class _InflightBucket:
     work: object
     buffer: torch.Tensor
     entries: List[_BucketEntry]
+    phase: int = 0
 
 
 @dataclass
@@ -1653,6 +1654,17 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             1,
             int(os.environ.get("POLAR_EF_LOWMEM_LAUNCH_BUCKETS_PER_HOOK", "1")),
         )
+        self.use_lowbit_scheduler = (
+            self.lowbit_group is not None
+            and getattr(self.lowbit_group, "backend_allreduce", False)
+            and hasattr(self.lowbit_group, "schedule_lowbit_allreduce")
+            and os.environ.get("POLAR_EF_LOWMEM_LOWBIT_SCHEDULER", "1").lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self.scheduler_max_inflight_buckets = max(
+            self.max_inflight_buckets,
+            3 * self.launch_buckets_per_hook,
+        )
         self.comm_stream = (
             torch.cuda.Stream(device=self.device)
             if self.device.type == "cuda"
@@ -1847,6 +1859,88 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
             "ef_lowmem lowbit explicit progress returned "
             f"block={block} progressed={progressed} "
             f"elapsed_ms={(time.perf_counter() - t_progress) * 1000.0:.3f}"
+        )
+
+    @torch.no_grad()
+    def _launch_scheduled_lowbit_bucket_(self, bucket_idx: int) -> _InflightBucket:
+        assert self.lowbit_group is not None
+        entries = self.buckets[bucket_idx]
+        bucket_t0 = time.perf_counter()
+        _polar_hook_timing(
+            "ef_lowmem scheduler phase1 launch enter "
+            f"idx={bucket_idx + 1}/{len(self.buckets)}"
+        )
+        if self.comm_stream is not None:
+            self.comm_stream.wait_stream(torch.cuda.current_stream(self.device))
+            with torch.cuda.stream(self.comm_stream):
+                buffer = self._pack_pred_bucket_and_seed_error_(entries)
+                handle = self.lowbit_group.schedule_lowbit_allreduce(buffer)
+        else:
+            buffer = self._pack_pred_bucket_and_seed_error_(entries)
+            handle = self.lowbit_group.schedule_lowbit_allreduce(buffer)
+        _polar_hook_timing(
+            "ef_lowmem scheduler phase1 launch exit "
+            f"idx={bucket_idx + 1}/{len(self.buckets)} "
+            f"numel={int(buffer.numel())} "
+            f"elapsed_ms={(time.perf_counter() - bucket_t0) * 1000.0:.3f}"
+        )
+        return _InflightBucket(work=handle, buffer=buffer, entries=entries, phase=1)
+
+    @torch.no_grad()
+    def _advance_scheduled_lowbit_buckets_(
+        self,
+        launch_budget: int,
+        *,
+        respect_inflight: bool = True,
+    ) -> None:
+        if (
+            self.offloaded_pred_buckets is None
+            or self.pending_pred_buckets is None
+            or self.next_pred_bucket_idx is None
+            or self.lowbit_group is None
+        ):
+            return
+
+        tick_t0 = time.perf_counter()
+        restored = 0
+        phase2 = 0
+        launched = 0
+
+        for inflight in self.pending_pred_buckets:
+            if inflight.phase == 2:
+                self.lowbit_group.launch_lowbit_restore(inflight.work)
+                inflight.phase = 3
+                restored += 1
+
+        for inflight in self.pending_pred_buckets:
+            if inflight.phase == 1:
+                self.lowbit_group.launch_lowbit_phase2(inflight.work)
+                inflight.phase = 2
+                phase2 += 1
+
+        while (
+            launched < launch_budget
+            and self.next_pred_bucket_idx < len(self.buckets)
+            and (
+                not respect_inflight
+                or len(self.pending_pred_buckets) < self.scheduler_max_inflight_buckets
+            )
+        ):
+            bucket_idx = self.next_pred_bucket_idx
+            self.pending_pred_buckets.append(
+                self._launch_scheduled_lowbit_bucket_(bucket_idx)
+            )
+            self.next_pred_bucket_idx += 1
+            launched += 1
+
+        drained = self._drain_ready_pred_buckets_()
+        _polar_hook_timing(
+            "ef_lowmem scheduler tick exit "
+            f"restore_launched={restored} phase2_launched={phase2} "
+            f"phase1_launched={launched} drained={drained} "
+            f"pending={len(self.pending_pred_buckets)} "
+            f"next_bucket={self.next_pred_bucket_idx} "
+            f"elapsed_ms={(time.perf_counter() - tick_t0) * 1000.0:.3f}"
         )
 
     @torch.no_grad()
@@ -2123,7 +2217,14 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
         self.offloaded_pred_buckets = []
         self.pending_pred_buckets = []
         self.next_pred_bucket_idx = 0
-        self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
+        if self.use_lowbit_scheduler:
+            _polar_hook_timing(
+                "ef_lowmem scheduler enabled "
+                f"scheduler_max_inflight={self.scheduler_max_inflight_buckets}"
+            )
+            self._advance_scheduled_lowbit_buckets_(self.launch_buckets_per_hook)
+        else:
+            self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
 
     @torch.no_grad()
     def _finish_offloaded_prediction_(self) -> None:
@@ -2138,7 +2239,22 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 "ef_lowmem predict bucket final catch-up launch "
                 f"next_idx={self.next_pred_bucket_idx + 1}/{len(self.buckets)}"
             )
-            self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
+            if self.use_lowbit_scheduler:
+                self._advance_scheduled_lowbit_buckets_(
+                    self.launch_buckets_per_hook,
+                    respect_inflight=False,
+                )
+            else:
+                self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
+
+        if self.use_lowbit_scheduler and self.pending_pred_buckets is not None:
+            for _ in range(len(self.buckets) + 3):
+                if not any(inflight.phase < 3 for inflight in self.pending_pred_buckets):
+                    break
+                self._advance_scheduled_lowbit_buckets_(
+                    self.launch_buckets_per_hook,
+                    respect_inflight=False,
+                )
 
         if self.pending_pred_buckets is not None:
             while self.pending_pred_buckets:
@@ -2208,7 +2324,10 @@ class PolarGpipeLowMemoryErrorFeedbackHook:
                 )
             elif self.offloaded_pred_buckets is not None:
                 t_launch = time.perf_counter()
-                self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
+                if self.use_lowbit_scheduler:
+                    self._advance_scheduled_lowbit_buckets_(self.launch_buckets_per_hook)
+                else:
+                    self._launch_next_pred_buckets_(self.launch_buckets_per_hook)
                 _polar_hook_timing(
                     "ef_lowmem hook progressive launch returned "
                     f"elapsed_ms={(time.perf_counter() - t_launch) * 1000.0:.3f}"
